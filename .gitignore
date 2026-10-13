@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.log
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/

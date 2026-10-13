@@ -1,0 +1,169 @@
+/* 基础调色板 - 简约实用 */
+:root {
+  --vt-c-white: #ffffff;
+  --vt-c-black: #050b16;
+
+  /* 主背景色 */
+  --color-app-background: #f5f7fb;
+  --color-panel: #ffffff;
+  --color-panel-alt: #f9fafb;
+  --color-surface: #ffffff;
+  --color-elevated-surface: #ffffff;
+
+  /* 边框系统 */
+  --color-border: #e5e7eb;
+  --color-border-strong: #d1d5db;
+
+  /* 文本系统 */
+  --color-heading: #111827;
+  --color-text-primary: #1f2937;
+  --color-text-secondary: #4b5563;
+  --color-muted: #9ca3af;
+
+  /* 主色调 - 克制的蓝色 */
+  --color-accent: #2563eb;
+  --color-accent-strong: #1d4ed8;
+  --color-accent-contrast: #ffffff;
+  --color-link: #2563eb;
+  --color-link-hover: #1d4ed8;
+
+  /* 危险色 */
+  --color-danger: #dc2626;
+  --color-danger-strong: #b91c1c;
+
+  /* 输入框 */
+  --color-input-background: #f9fafb;
+
+  /* 工具栏 */
+  --color-toolbar-bg: #eff6ff;
+  --color-toolbar-hover-bg: #dbeafe;
+  --color-toolbar-text: #1d4ed8;
+  --color-toolbar-muted: #6b7280;
+
+  /* 代码块 */
+  --color-code-surface: #f9fafb;
+  --color-code-border: #e5e7eb;
+  --color-code-label: #6b7280;
+  --color-copy-button-bg: #374151;
+  --color-copy-button-hover: #1f2937;
+
+  /* 新消息指示器 */
+  --color-new-indicator-bg: #1f2937;
+
+  /* 表格 */
+  --color-table-bg: #ffffff;
+  --color-table-header-bg: #f9fafb;
+  --color-table-border: #e5e7eb;
+
+  /* 滚动条 */
+  --color-scroll-track: #f3f4f6;
+  --color-scroll-thumb: #d1d5db;
+  --color-scroll-thumb-hover: #9ca3af;
+
+  /* 用户消息气泡 - 纯色，不花哨 */
+  --color-bubble-user: #2563eb;
+  --color-bubble-user-border: #1d4ed8;
+
+  /* 停止按钮 */
+  --color-stop-button-bg: #fef2f2;
+  --color-stop-button-shadow: rgba(220, 38, 38, 0.1);
+  --color-stop-button-text: #dc2626;
+
+  /* 阴影系统 - 精致且有层次感 */
+  --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-strong: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+/* 深色模式 */
+:root[data-theme="dark"] {
+  --color-app-background: #020617;
+  --color-panel: #0f172a;
+  --color-panel-alt: #020617;
+  --color-surface: #0f172a;
+  --color-elevated-surface: #1e293b;
+
+  --color-border: #1e293b;
+  --color-border-strong: #334155;
+
+  --color-heading: #f8fafc;
+  --color-text-primary: #e2e8f0;
+  --color-text-secondary: #94a3b8;
+  --color-muted: #64748b;
+
+  --color-accent: #3b82f6;
+  --color-accent-strong: #2563eb;
+  --color-accent-contrast: #ffffff;
+  --color-link: #60a5fa;
+  --color-link-hover: #93c5fd;
+
+  --color-danger: #f87171;
+  --color-danger-strong: #ef4444;
+
+  --color-input-background: #1e293b;
+
+  --color-toolbar-bg: rgba(59, 130, 246, 0.15);
+  --color-toolbar-hover-bg: rgba(59, 130, 246, 0.25);
+  --color-toolbar-text: #93c5fd;
+  --color-toolbar-muted: #64748b;
+
+  --color-code-surface: #1e293b;
+  --color-code-border: #334155;
+  --color-code-label: #94a3b8;
+  --color-copy-button-bg: #334155;
+  --color-copy-button-hover: #475569;
+
+  --color-new-indicator-bg: #2563eb;
+
+  --color-table-bg: #0f172a;
+  --color-table-header-bg: #1e293b;
+  --color-table-border: #334155;
+
+  --color-scroll-track: #020617;
+  --color-scroll-thumb: #334155;
+  --color-scroll-thumb-hover: #475569;
+
+  --color-bubble-user: #2563eb;
+  --color-bubble-user-border: #3b82f6;
+
+  --color-stop-button-bg: rgba(248, 113, 113, 0.15);
+  --color-stop-button-shadow: rgba(248, 113, 113, 0.2);
+  --color-stop-button-text: #f87171;
+
+  --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+  --shadow-strong: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  font-weight: normal;
+}
+
+body {
+  min-height: 100vh;
+  color: var(--color-text-primary);
+  background: var(--color-app-background);
+  transition: color 0.2s ease, background-color 0.2s ease;
+  line-height: 1.6;
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Oxygen,
+    Ubuntu,
+    Cantarell,
+    "Fira Sans",
+    "Droid Sans",
+    "Helvetica Neue",
+    sans-serif;
+  font-size: 15px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
