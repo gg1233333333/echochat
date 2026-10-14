@@ -26,6 +26,7 @@ export const useThemeStore = defineStore("theme", () => {
 
   const toggleMode = () => {
     setMode(mode.value === "dark" ? "light" : "dark");
+    localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify({ mode: mode.value }));
   };
 
   const handleSystemChange = (event) => {
@@ -91,6 +92,4 @@ export const useThemeStore = defineStore("theme", () => {
     setMode,
     applyTheme,
   };
-}, {
-  persist: true,
 });

@@ -8,14 +8,14 @@
         <div class="attachment-title">
           <span class="attachment-name">{{ file.name }}</span>
           <span class="attachment-meta">
-            {{ formatSize(file.size) }} · {{ file.type || "未知类型" }}
+            {{ formatSize(file.size) }} · {{ file.mime || "未知类型" }}
           </span>
         </div>
-        <p v-if="file.body" class="attachment-preview">
-          {{ truncate(file.body) }}
+        <p v-if="file.extracted_text" class="attachment-preview">
+          {{ truncate(file.extracted_text) }}
         </p>
-        <p v-else-if="file.note" class="attachment-preview">
-          {{ file.note }}
+        <p v-if="file.note || file.truncated" class="attachment-preview">
+          {{ file.note || "正文已截断，仅发送前 8000 字符" }}
         </p>
       </div>
     </div>
@@ -37,14 +37,8 @@ const props = defineProps({
   },
 });
 
-/**
- * 将外部传入的附件数组转为受控的计算属性，确保模板内访问安全。
- */
 const attachments = computed(() => props.attachments ?? []);
 
-/**
- * 文件大小显示助手，自动选择合适的单位。
- */
 const formatSize = (size) => {
   if (!size && size !== 0) return "";
   if (size < 1024) return `${size}B`;
@@ -52,9 +46,6 @@ const formatSize = (size) => {
   return `${(size / (1024 * 1024)).toFixed(1)}MB`;
 };
 
-/**
- * 为附件正文提供安全的截断逻辑，避免超长文本撑开气泡。
- */
 const truncate = (text = "") => {
   if (!text) return "";
   if (text.length <= props.maxPreviewLength) {
@@ -66,20 +57,20 @@ const truncate = (text = "") => {
 
 <style scoped>
 .attachment-list {
-  margin-top: 10px;
+  margin-top: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .attachment-item {
   display: flex;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--color-toolbar-bg);
-  border: 1px solid rgba(59, 130, 246, 0.18);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+  gap: var(--space-3);
+  min-width: 0;
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-list);
+  background: var(--color-panel-alt);
+  border: 1px solid var(--color-border);
 }
 
 .attachment-icon {
@@ -88,42 +79,47 @@ const truncate = (text = "") => {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 10px;
-  background: rgba(59, 130, 246, 0.18);
+  flex-shrink: 0;
+  border-radius: var(--radius-control);
+  background: var(--color-toolbar-bg);
   color: var(--color-accent-strong);
 }
 
 .attachment-content {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1);
   color: var(--color-text-secondary);
 }
 
 .attachment-title {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 12px;
+  gap: var(--space-1) var(--space-3);
 }
 
 .attachment-name {
   font-weight: 600;
   font-size: 14px;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  color: var(--color-text-primary);
 }
 
 .attachment-meta {
-  font-size: 11px;
-  color: var(--color-muted);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
 }
 
 .attachment-preview {
   margin: 0;
   font-size: 13px;
   color: var(--color-text-secondary);
-  line-height: 1.5;
+  line-height: 1.6;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 </style>

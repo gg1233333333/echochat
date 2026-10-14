@@ -1,236 +1,349 @@
 <style src="@/assets/main.css"></style>
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ChatMessage from "@/views/chatMessage.vue";
 import ConversationSidebar from "@/components/chat/ConversationSidebar.vue";
 import { useThemeStore } from "@/stores/theme";
 import { useSessionStore } from "@/stores/session";
 import { useDynamicFavicon } from "@/composables/useDynamicFavicon";
-import { Close, Menu } from "@element-plus/icons-vue";
+import { useOpening } from "@/composables/useOpening";
+import WelcomeStage from "@/components/opening/WelcomeStage.vue";
+import EchoBrand from "@/components/opening/EchoBrand.vue";
+import InspirationCards from "@/components/opening/InspirationCards.vue";
 
-// 使用动态 favicon，根据角色自动切换
 const sessionStore = useSessionStore();
-useDynamicFavicon(computed(() => sessionStore.currentRole));
-
-/**
- * 保存右侧对话面板的组件引用，方便在侧边栏切换会话时
- * 调用内部暴露的方法来同步消息列表。
- */
-const chatPanelRef = ref(null);
 const themeStore = useThemeStore();
-
-const MOBILE_BREAKPOINT = 1024;
-
+useDynamicFavicon(computed(() => sessionStore.options?.roles[0]?.icons?.favicon));
+const chatPanelRef = ref(null);
+const viewportWidth = ref(window.innerWidth);
+const isMobile = computed(() => viewportWidth.value < 768);
 const isSidebarOpen = ref(false);
-const isMobile = ref(false);
-
-const currentConversationTitle = computed(
-  () => sessionStore.curname || "DeepSeek 对话",
+const desktopCollapsed = ref(false);
+const isRail = computed(
+  () => !isMobile.value && (viewportWidth.value < 1200 || desktopCollapsed.value),
 );
-
+const overlayOpen = computed(() => isSidebarOpen.value && (isMobile.value || isRail.value));
+const workspace = ref(null);
+const sidebar = ref(null);
+const stage = ref(null);
+const brand = ref(null);
+const brandInHeader = isMobile;
+const hasMessages = computed(() => sessionStore.messages.length > 0);
+const opening = useOpening({
+  workspace,
+  stage,
+  brand,
+  hasMessages,
+  getBrandDock: () => (brandInHeader.value ? "#echo-header-brand" : "#echo-sidebar-brand"),
+  getBrandCompact: () => isMobile.value || (isRail.value && !overlayOpen.value),
+  canReplay: () => !sessionStore.isGenerating,
+});
+const { phase, mounted, active, full, docked, reducedMotion, brandTarget, cardTarget } = opening;
+const chooseSuggestion = (prompt) => {
+  if (active.value || !sessionStore.ready) return;
+  const draft = sessionStore.currentDraft.text;
+  sessionStore.setDraftText(draft ? `${draft.trimEnd()}\n\n${prompt}` : prompt);
+  workspace.value?.querySelector("textarea.inputbox")?.focus({ preventScroll: true });
+};
+const sidebarVisible = computed(() => (isMobile.value || isRail.value ? overlayOpen.value : true));
+let sidebarTrigger;
+let sidebarTriggerLabel;
+let sidebarFocusTarget;
+const rememberSidebarTrigger = () => {
+  sidebarTrigger = document.activeElement;
+  sidebarTriggerLabel = sidebarTrigger?.getAttribute("aria-label");
+};
+const toggleSidebar = () => {
+  rememberSidebarTrigger();
+  sidebarFocusTarget = null;
+  if (isMobile.value || viewportWidth.value < 1200) isSidebarOpen.value = !isSidebarOpen.value;
+  else desktopCollapsed.value = !desktopCollapsed.value;
+};
+const expandSidebar = (source) => {
+  rememberSidebarTrigger();
+  sidebarFocusTarget = source === "search" ? ".search-input input" : null;
+  isSidebarOpen.value = true;
+};
+const closeSidebar = () => {
+  const shouldRestore = overlayOpen.value;
+  isSidebarOpen.value = false;
+  if (shouldRestore)
+    void nextTick(() => {
+      const trigger =
+        sidebarTrigger?.isConnected && sidebarTrigger.getClientRects().length
+          ? sidebarTrigger
+          : sidebarTriggerLabel &&
+            workspace.value?.querySelector(
+              `button[aria-label="${CSS.escape(sidebarTriggerLabel)}"]`,
+            );
+      (trigger || workspace.value?.querySelector('button[aria-label="切换会话列表"]'))?.focus({
+        preventScroll: true,
+      });
+    });
+};
+const updateViewportMode = () => {
+  closeSidebar();
+  viewportWidth.value = window.innerWidth;
+};
+watch(overlayOpen, async (open) => {
+  if (!open) return;
+  await nextTick();
+  sidebar.value
+    ?.querySelector(sidebarFocusTarget || "button:not(:disabled)")
+    ?.focus({ preventScroll: true });
+});
+const sidebarKeyboard = (event) => {
+  if (!overlayOpen.value) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSidebar();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const items = [
+    ...sidebar.value.querySelectorAll('button:not(:disabled),input:not(:disabled),[tabindex="0"]'),
+  ].filter((element) => element.getClientRects().length);
+  const first = items[0];
+  const last = items.at(-1);
+  if (
+    (event.shiftKey && document.activeElement === first) ||
+    (!event.shiftKey && document.activeElement === last)
+  ) {
+    event.preventDefault();
+    (event.shiftKey ? last : first)?.focus();
+  }
+};
+const replayOpening = () => {
+  closeSidebar();
+  void opening.replay();
+};
+const handleHistorySelect = (id) => {
+  chatPanelRef.value?.selecthistory(id);
+  closeSidebar();
+};
+onMounted(() => {
+  sessionStore.initialize().catch(sessionStore.reportError);
+  window.addEventListener("resize", updateViewportMode, { passive: true });
+  window.addEventListener("pagehide", sessionStore.disconnect);
+});
 onBeforeUnmount(() => {
   themeStore.cleanup();
-  if (typeof window !== "undefined") {
-    window.removeEventListener("resize", updateViewportMode);
-  }
-});
-
-/**
- * 当侧边栏选中一个历史会话时，将事件继续传递给
- * ChatMessage 组件，从而刷新当前的消息内容。
- */
-const handleHistorySelect = (conversation) => {
-  chatPanelRef.value?.selecthistory(conversation);
-  if (isMobile.value) {
-    isSidebarOpen.value = false;
-  }
-};
-
-const updateViewportMode = () => {
-  if (typeof window === "undefined") return;
-  isMobile.value = window.innerWidth <= MOBILE_BREAKPOINT;
-  if (!isMobile.value) {
-    isSidebarOpen.value = false;
-  }
-};
-
-const toggleSidebar = () => {
-  if (!isMobile.value) return;
-  isSidebarOpen.value = !isSidebarOpen.value;
-};
-
-const closeSidebar = () => {
-  if (!isMobile.value) return;
-  isSidebarOpen.value = false;
-};
-
-onMounted(() => {
-  updateViewportMode();
-  if (typeof window !== "undefined") {
-    window.addEventListener("resize", updateViewportMode, { passive: true });
-  }
+  sessionStore.disconnect();
+  window.removeEventListener("resize", updateViewportMode);
+  window.removeEventListener("pagehide", sessionStore.disconnect);
 });
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'is-sidebar-open': isSidebarOpen }">
-    <header class="mobile-header">
-      <button
-        class="mobile-header__action"
-        type="button"
-        @click="toggleSidebar"
-        aria-label="切换会话列表"
-      >
-        <el-icon>
-          <component :is="isSidebarOpen ? Close : Menu" />
-        </el-icon>
-      </button>
-      <div class="mobile-header__title" :title="currentConversationTitle">
-        {{ currentConversationTitle }}
-      </div>
-    </header>
-    <div class="box">
-      <div class="sideleft" :class="{ 'is-mobile-active': isSidebarOpen }">
-        <ConversationSidebar @callR="handleHistorySelect" />
-      </div>
-      <div class="sideright">
-        <ChatMessage ref="chatPanelRef" />
-      </div>
-    </div>
+  <div
+    class="echo-app"
+    :class="{
+      'is-opening-active': active,
+      'is-entering': phase === 'entering',
+      'has-welcome': full,
+    }"
+    :data-opening-phase="phase"
+  >
     <div
-      v-if="isMobile && isSidebarOpen"
-      class="mobile-overlay"
-      @click="closeSidebar"
-    ></div>
+      ref="workspace"
+      class="app-shell"
+      :class="{ 'is-rail': isRail, 'has-sidebar-overlay': overlayOpen }"
+      :inert="active"
+      :aria-hidden="active"
+    >
+      <div
+        ref="sidebar"
+        class="sideleft"
+        :class="{ 'is-mobile-active': overlayOpen }"
+        :inert="isMobile && !overlayOpen"
+        @keydown="sidebarKeyboard"
+      >
+        <ConversationSidebar
+          :mobile="isMobile"
+          :closable="overlayOpen"
+          :compact="isRail && !overlayOpen"
+          @request-expand="expandSidebar"
+          @callR="handleHistorySelect"
+          @close="closeSidebar"
+          @replay-opening="replayOpening"
+        />
+      </div>
+      <main class="sideright" :inert="overlayOpen" :aria-hidden="overlayOpen">
+        <ChatMessage
+          ref="chatPanelRef"
+          :sidebar-open="sidebarVisible"
+          :brand-in-header="brandInHeader"
+          @toggle-sidebar="toggleSidebar"
+        />
+      </main>
+      <button
+        v-if="overlayOpen"
+        class="mobile-overlay"
+        aria-label="关闭会话列表"
+        @click="closeSidebar"
+      ></button>
+    </div>
+    <WelcomeStage
+      v-if="full"
+      ref="stage"
+      :reduced-motion="reducedMotion"
+      :exiting="phase === 'entering'"
+      @enter="opening.enter"
+    />
+    <Teleport v-if="mounted" :to="brandTarget">
+      <EchoBrand
+        ref="brand"
+        :opening="!docked"
+        :compact="docked && brandInHeader"
+        :reduced-motion="reducedMotion"
+      />
+    </Teleport>
+    <Teleport v-if="mounted && cardTarget" :to="cardTarget" defer>
+      <InspirationCards
+        :opening="!docked"
+        :disabled="!sessionStore.ready || active"
+        @choose="chooseSuggestion"
+      />
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
-.app-shell {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
+.echo-app {
+  height: 100dvh;
+  background: var(--color-shell);
+}
+.is-opening-active .app-shell {
+  opacity: 0;
+  pointer-events: none;
+}
+.is-entering .app-shell {
   position: relative;
+  z-index: 4002;
+  background: transparent;
 }
-
-.box {
-  display: flex;
-  height: 100%;
-  width: 100%;
-  background: var(--color-app-background);
+.is-entering .sideleft {
+  background: transparent;
 }
-
-.mobile-header {
-  display: none;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  background: var(--color-panel);
-  border-bottom: 1px solid var(--color-border);
-  position: sticky;
-  top: 0;
-  z-index: 12;
-}
-
-.mobile-header__action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  transition: background-color 0.2s ease, color 0.2s ease;
-}
-
-.mobile-header__action:hover {
-  background: var(--color-toolbar-bg);
-  color: var(--color-heading);
-}
-
-.mobile-header__title {
-  flex: 1;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-heading);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sideleft {
-  height: 100%;
+.is-entering .sideleft::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   background: var(--color-sidebar-surface);
-  width: 400px;
-  border-right: 1px solid var(--color-border-strong);
+  opacity: var(--sidebar-opacity, 0);
+  pointer-events: none;
+}
+.is-entering :deep(.sidebar) {
+  position: relative;
+  background: transparent;
+}
+.is-entering .sideright {
+  background: transparent;
+}
+.is-entering :deep(.header) {
+  background: transparent;
+  border-color: transparent;
+}
+.is-entering :deep(.echo-mark) {
+  transition: filter 0.85s ease;
+}
+.is-entering :deep(.echo-mark path),
+.is-entering :deep(.echo-mark circle),
+.is-entering :deep(.echo-eyes) {
+  transition:
+    fill 0.85s ease,
+    stroke 0.85s ease;
+}
+.is-entering .sideright::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--color-panel);
+  mask-image: linear-gradient(
+    to right,
+    transparent calc(var(--canvas-reveal, 110%) - 10%),
+    #000 calc(var(--canvas-reveal, 110%) + 10%)
+  );
+  transform: translateX(var(--canvas-offset, 16px)) scale(var(--canvas-scale, 0.985));
+  transform-origin: right center;
+  pointer-events: none;
+}
+.app-shell {
+  --chat-column-width: 840px;
+  --chat-gutter: 32px;
+  --chat-header-height: 60px;
+  display: flex;
+  height: 100dvh;
+  padding: 12px;
+  gap: 12px;
+  overflow: hidden;
+  background: var(--color-shell);
+}
+.sideleft {
+  position: relative;
+  width: 248px;
+  flex: 0 0 248px;
+  min-height: 0;
+  background: var(--color-sidebar-surface);
+  border-radius: var(--radius-canvas);
 }
 .sideright {
-  height: 100%;
-  width: 100%;
-  background: var(--color-panel-alt);
   display: flex;
+  flex: 1;
   flex-direction: column;
-
+  min-width: 0;
+  min-height: 0;
   position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-canvas);
+  background: var(--color-panel);
 }
-
+.is-rail .sideleft {
+  width: 72px;
+  flex-basis: 72px;
+}
+.is-rail.has-sidebar-overlay .sideleft {
+  position: absolute;
+  inset: 12px auto 12px 12px;
+  z-index: 31;
+  width: 248px;
+  box-shadow: var(--shadow-strong);
+}
+.is-rail.has-sidebar-overlay .sideright {
+  margin-left: 84px;
+}
 .mobile-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  backdrop-filter: blur(2px);
-  z-index: 10;
+  z-index: 30;
+  border: 0;
+  background: rgb(0 8 22 / 58%);
+  cursor: pointer;
 }
-
-@media (max-width: 1024px) {
-  .box {
-    flex: 1;
-    position: relative;
+@media (max-width: 767px) {
+  .app-shell {
+    --chat-gutter: 16px;
+    --chat-header-height: 56px;
+    padding: 0;
+    gap: 0;
   }
-
-  .mobile-header {
-    display: flex;
+  .sideright {
+    border-radius: 0;
   }
-
   .sideleft {
     position: fixed;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: min(360px, 85vw);
-    max-width: 100%;
+    inset: 0 auto 0 0;
+    z-index: 31;
+    width: min(280px, 88vw);
+    border-radius: 0 var(--radius-canvas) var(--radius-canvas) 0;
     transform: translateX(-100%);
-    transition: transform 0.25s ease, box-shadow 0.25s ease;
-    z-index: 11;
-    box-shadow: none;
+    transition: transform var(--motion-normal) ease;
   }
-
   .sideleft.is-mobile-active {
     transform: translateX(0);
-    box-shadow: 12px 0 32px rgba(15, 23, 42, 0.24);
-  }
-
-  .sideright {
-    width: 100%;
-  }
-}
-
-@media (max-width: 640px) {
-  .mobile-header {
-    padding: 10px 14px;
-  }
-
-  .mobile-header__action {
-    width: 36px;
-    height: 36px;
-  }
-
-  .mobile-header__title {
-    font-size: 15px;
+    box-shadow: var(--shadow-strong);
   }
 }
 </style>
