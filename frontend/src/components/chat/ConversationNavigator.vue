@@ -90,64 +90,66 @@ watch(
         </template>
       </el-tooltip>
     </div>
-    <div class="conversation-navigator__mobile">
-      <el-popover
-        v-model:visible="mobileOpen"
-        trigger="click"
-        placement="bottom-end"
-        :width="300"
-        :show-arrow="false"
-        :persistent="false"
-        popper-class="conversation-navigation-popper"
-        @after-leave="afterMobileClose"
-      >
-        <template #reference>
-          <span class="conversation-navigator__reference"
-            ><button
-              ref="mobileTrigger"
-              class="conversation-navigator__trigger"
-              type="button"
-              aria-label="定位对话"
-              :aria-expanded="mobileOpen"
-              :aria-controls="listId"
-              title="定位对话"
-              @keydown.esc.prevent.stop="closeMobile"
-            >
-              <el-icon><Guide /></el-icon></button
-          ></span>
-        </template>
-        <p class="conversation-navigation-heading">已加载 {{ entries.length }} 轮对话</p>
-        <div
-          ref="mobileList"
-          :id="listId"
-          class="conversation-navigation-list"
-          @keydown.esc.prevent.stop="closeMobile"
+    <Teleport to="#echo-navigation-dock" defer>
+      <nav class="conversation-navigator__mobile" aria-label="对话定位">
+        <el-popover
+          v-model:visible="mobileOpen"
+          trigger="click"
+          placement="bottom-end"
+          :width="300"
+          :show-arrow="false"
+          :persistent="false"
+          popper-class="conversation-navigation-popper"
+          @after-leave="afterMobileClose"
         >
-          <button
-            v-for="(entry, index) in entries"
-            :key="entry.id"
-            class="conversation-navigation-item"
-            :class="{ 'is-active': activeId === entry.id }"
-            type="button"
-            :data-navigation-id="entry.id"
-            :aria-current="activeId === entry.id ? 'location' : undefined"
-            @click="select(entry.id)"
+          <template #reference>
+            <span class="conversation-navigator__reference"
+              ><button
+                ref="mobileTrigger"
+                class="conversation-navigator__trigger"
+                type="button"
+                aria-label="定位对话"
+                :aria-expanded="mobileOpen"
+                :aria-controls="listId"
+                title="定位对话"
+                @keydown.esc.prevent.stop="closeMobile"
+              >
+                <el-icon><Guide /></el-icon></button
+            ></span>
+          </template>
+          <p class="conversation-navigation-heading">已加载 {{ entries.length }} 轮对话</p>
+          <div
+            ref="mobileList"
+            :id="listId"
+            class="conversation-navigation-list"
+            @keydown.esc.prevent.stop="closeMobile"
           >
-            <span class="conversation-navigation-number">{{ index + 1 }}</span>
-            <span class="conversation-navigation-copy"
-              ><span>{{ entry.label }}</span
-              ><small v-if="entry.preview">{{ entry.preview }}</small></span
+            <button
+              v-for="(entry, index) in entries"
+              :key="entry.id"
+              class="conversation-navigation-item"
+              :class="{ 'is-active': activeId === entry.id }"
+              type="button"
+              :data-navigation-id="entry.id"
+              :aria-current="activeId === entry.id ? 'location' : undefined"
+              @click="select(entry.id)"
             >
-            <el-icon
-              v-if="activeId === entry.id"
-              class="conversation-navigation-check"
-              aria-hidden="true"
-              ><Check
-            /></el-icon>
-          </button>
-        </div>
-      </el-popover>
-    </div>
+              <span class="conversation-navigation-number">{{ index + 1 }}</span>
+              <span class="conversation-navigation-copy"
+                ><span>{{ entry.label }}</span
+                ><small v-if="entry.preview">{{ entry.preview }}</small></span
+              >
+              <el-icon
+                v-if="activeId === entry.id"
+                class="conversation-navigation-check"
+                aria-hidden="true"
+                ><Check
+              /></el-icon>
+            </button>
+          </div>
+        </el-popover>
+      </nav>
+    </Teleport>
   </nav>
 </template>
 
@@ -221,12 +223,7 @@ watch(
 }
 @media (max-width: 767px) {
   .conversation-navigator {
-    position: relative;
-    inset: auto;
-    flex-shrink: 0;
-    width: 100%;
-    height: 52px;
-    padding: var(--space-1) var(--chat-gutter);
+    display: none;
   }
   .conversation-navigator__rail {
     display: none;

@@ -54,10 +54,11 @@ const newChat = async () => {
   creating.value = true;
   try {
     const item = await sessionStore.newConversation();
+    if (sessionStore.currentId !== item.id) return;
     keyword.value = "";
-    emit("callR", item.id);
+    emit("close");
     await nextTick();
-    listRef.value?.setScrollTop?.(0);
+    if (sessionStore.currentId === item.id) listRef.value?.setScrollTop?.(0);
   } catch (error) {
     sessionStore.reportError(error);
   } finally {

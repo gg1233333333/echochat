@@ -218,6 +218,8 @@ const cancelTitleEditing = () => {
   void focusTitle();
 };
 const saveTitle = async (event) => {
+  if (event?.isComposing || event?.keyCode === 229) return;
+  if (event?.type === "keydown") event.preventDefault();
   if (savingTitle.value || !isEditingTitle.value) return;
   if (!tempTitle.value.trim()) {
     ElMessage.warning("标题不能为空");
@@ -240,7 +242,7 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
 
 <template>
   <section class="chat-view" :class="{ 'has-messages': !isEmpty }">
-    <header class="header">
+    <header class="header" :class="{ 'is-editing-title': isEditingTitle }">
       <button
         class="title-action sidebar-toggle"
         aria-label="切换会话列表"
@@ -270,7 +272,7 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
             class="title-input"
             size="small"
             aria-label="对话标题"
-            @keyup.enter="saveTitle"
+            @keydown.enter="saveTitle"
             @keydown.esc.prevent="cancelTitleEditing"
             @blur="saveTitle"
           />
@@ -316,6 +318,7 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
           /></el-icon>
         </el-option>
       </el-select>
+      <div v-show="!isEmpty" id="echo-navigation-dock" class="conversation-navigation-dock"></div>
     </header>
     <el-alert
       v-if="store.error"
@@ -541,6 +544,9 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
 .header-brand-dock {
   width: 22px;
   flex-shrink: 0;
+}
+.conversation-navigation-dock {
+  display: none;
 }
 .header-title-text {
   overflow: hidden;
@@ -896,6 +902,7 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
 }
 .content :deep(th),
 .content :deep(td) {
+  min-width: 10rem;
   overflow-wrap: normal;
   word-break: normal;
   padding: var(--space-2) var(--space-3);
@@ -1087,6 +1094,7 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
     width: 44px;
     height: 44px;
   }
+  .title-input :deep(.el-input__wrapper),
   .model-select :deep(.el-select__wrapper) {
     min-height: 44px;
   }
@@ -1100,10 +1108,20 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
     margin-bottom: var(--space-2);
   }
   .header {
-    gap: var(--space-2);
+    gap: var(--space-1);
   }
   .model-select {
-    width: 118px;
+    width: 106px;
+  }
+  .conversation-navigation-dock {
+    display: flex;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+  }
+  .header.is-editing-title .model-select,
+  .header.is-editing-title .conversation-navigation-dock {
+    display: none;
   }
   .header-title-text {
     font-size: 15px;

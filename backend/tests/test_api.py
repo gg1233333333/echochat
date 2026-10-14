@@ -272,6 +272,88 @@ class BlockingStream(httpx.AsyncByteStream):
         self.closed.set()
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "cancelled"])
+async def test_import_rejected_during_generation_preserves_stream(tmp_path, terminal_status):
+    class ImportStream(BlockingStream):
+        def __init__(self):
+            super().__init__()
+            self.continue_stream = asyncio.Event()
+            self.checkpointed = asyncio.Event()
+            self.finish = asyncio.Event()
+
+        async def __aiter__(self):
+            yield (
+                b'data: {"choices":[{"delta":{"content":"partial",'
+                b'"reasoning_content":"partial reasoning"}}]}\n\n'
+            )
+            self.first.set()
+            await self.continue_stream.wait()
+            await asyncio.sleep(1.1)
+            yield (
+                b'data: {"choices":[{"delta":{"content":" continued",'
+                b'"reasoning_content":" continued"}}]}\n\n'
+            )
+            self.checkpointed.set()
+            await self.finish.wait()
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    stream = ImportStream()
+    app = create_app(
+        data_dir=tmp_path,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=stream)),
+    )
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://localhost:8000"
+        ) as api:
+            conversation = await setup_chat(api)
+            rid = request_id()
+            generation = asyncio.create_task(send(api, conversation, text="slow", rid=rid))
+            try:
+                await asyncio.wait_for(stream.first.wait(), timeout=3)
+                snapshot = {"session": {"imported": [{"role": "user", "content": "old"}]}}
+                imported = await api.post("/api/import/local-history", json={"snapshot": snapshot})
+                assert imported.status_code == 409
+                assert imported.json()["detail"]["code"] == "GENERATION_BUSY"
+                assert not generation.done() and not stream.closed.is_set()
+                conversations = (await api.get("/api/conversations")).json()["items"]
+                assert [item["id"] for item in conversations] == [conversation["id"]]
+
+                stream.continue_stream.set()
+                await asyncio.wait_for(stream.checkpointed.wait(), timeout=3)
+                messages = (
+                    await api.get(f"/api/conversations/{conversation['id']}/messages")
+                ).json()["items"]
+                checkpoint = messages[-1]
+                assert checkpoint["status"] == "generating"
+                assert checkpoint["content"] == "partial continued"
+                assert checkpoint["reasoning_content"] == "partial reasoning continued"
+                if terminal_status == "cancelled":
+                    cancelled = await asyncio.wait_for(
+                        api.post(f"/api/generations/{rid}/cancel"), timeout=3
+                    )
+                    assert cancelled.json()["message"]["status"] == "cancelled"
+                else:
+                    stream.finish.set()
+                terminal = events(await asyncio.wait_for(generation, timeout=3))[-1]
+                assert terminal["message"]["status"] == terminal_status
+                assert terminal["message"]["content"] == checkpoint["content"]
+                assert terminal["message"]["reasoning_content"] == checkpoint["reasoning_content"]
+                saved = (await api.get(f"/api/messages/{checkpoint['id']}")).json()
+                assert saved["status"] == terminal_status
+                assert saved["content"] == checkpoint["content"]
+                assert saved["reasoning_content"] == checkpoint["reasoning_content"]
+                assert stream.closed.is_set()
+                imported = await api.post("/api/import/local-history", json={"snapshot": snapshot})
+                assert imported.status_code == 200
+                assert imported.json()["imported_messages"] == 1
+            finally:
+                stream.continue_stream.set()
+                stream.finish.set()
+                await asyncio.wait_for(generation, timeout=3)
+
+
 async def test_cancel_busy_context_mutation_and_delete(tmp_path):
     stream = BlockingStream()
     app = create_app(

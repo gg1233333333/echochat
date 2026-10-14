@@ -239,60 +239,63 @@ class ChatService:
 
     async def import_history(self, normalized: dict):
         counts = {"imported_conversations": 0, "imported_messages": 0, "skipped_conversations": 0}
-        async with self.lock, self.db.sessions.begin() as session:
-            for source in normalized["conversations"]:
-                existing = await session.scalar(
-                    select(Conversation.id).where(
-                        Conversation.import_identity == source["import_identity"]
-                    )
-                )
-                if existing:
-                    counts["skipped_conversations"] += 1
-                    continue
-                conversation = Conversation(
-                    title=source["title"],
-                    title_source="default" if source["title"] == "新对话" else "manual",
-                    current_role_id=source["current_role_id"],
-                    context_segment=source["context_segment"],
-                    import_identity=source["import_identity"],
-                    next_seq=len(source["messages"]) + 1,
-                )
-                session.add(conversation)
-                await session.flush()
-                # Imported records lack original timestamps; do not invent them.
-                conversation.created_at = source.get("created_at")
-                conversation.updated_at = source.get("updated_at")
-                message_ids = [new_id() for _ in source["messages"]]
-                for index, original in enumerate(source["messages"]):
-                    related_index = original.get("related_user_index")
-                    message = Message(
-                        id=message_ids[index],
-                        conversation_id=conversation.id,
-                        seq=index + 1,
-                        role=original["role"],
-                        content=original["content"],
-                        role_id=original.get("role_id"),
-                        context_segment=original.get("context_segment"),
-                        mode=original.get("mode"),
-                        status=original.get("status", "completed"),
-                        related_user_message_id=(
-                            message_ids[related_index] if related_index is not None else None
-                        ),
-                        attachments=[
-                            Attachment(**item) for item in original.get("attachments", [])
-                        ],
-                    )
-                    session.add(message)
-                    await session.flush()
-                    message.created_at = original.get("created_at")
-                    if message.role == "user":
-                        self.name_conversation(
-                            conversation,
-                            message.content,
-                            [item.name for item in message.attachments],
+        async with self.lock:
+            if self.generations.active is not None:
+                raise AppError(409, "GENERATION_BUSY", "请等待当前回复完成或停止生成后再导入记录。")
+            async with self.db.sessions.begin() as session:
+                for source in normalized["conversations"]:
+                    existing = await session.scalar(
+                        select(Conversation.id).where(
+                            Conversation.import_identity == source["import_identity"]
                         )
-                counts["imported_conversations"] += 1
-                counts["imported_messages"] += len(source["messages"])
+                    )
+                    if existing:
+                        counts["skipped_conversations"] += 1
+                        continue
+                    conversation = Conversation(
+                        title=source["title"],
+                        title_source="default" if source["title"] == "新对话" else "manual",
+                        current_role_id=source["current_role_id"],
+                        context_segment=source["context_segment"],
+                        import_identity=source["import_identity"],
+                        next_seq=len(source["messages"]) + 1,
+                    )
+                    session.add(conversation)
+                    await session.flush()
+                    # Imported records lack original timestamps; do not invent them.
+                    conversation.created_at = source.get("created_at")
+                    conversation.updated_at = source.get("updated_at")
+                    message_ids = [new_id() for _ in source["messages"]]
+                    for index, original in enumerate(source["messages"]):
+                        related_index = original.get("related_user_index")
+                        message = Message(
+                            id=message_ids[index],
+                            conversation_id=conversation.id,
+                            seq=index + 1,
+                            role=original["role"],
+                            content=original["content"],
+                            role_id=original.get("role_id"),
+                            context_segment=original.get("context_segment"),
+                            mode=original.get("mode"),
+                            status=original.get("status", "completed"),
+                            related_user_message_id=(
+                                message_ids[related_index] if related_index is not None else None
+                            ),
+                            attachments=[
+                                Attachment(**item) for item in original.get("attachments", [])
+                            ],
+                        )
+                        session.add(message)
+                        await session.flush()
+                        message.created_at = original.get("created_at")
+                        if message.role == "user":
+                            self.name_conversation(
+                                conversation,
+                                message.content,
+                                [item.name for item in message.attachments],
+                            )
+                    counts["imported_conversations"] += 1
+                    counts["imported_messages"] += len(source["messages"])
         return counts
 
     async def build_context(

@@ -25,6 +25,8 @@ export const useSessionStore = defineStore("chat", () => {
   const activeGeneration = ref(null);
   let generation;
   let initialization;
+  let navigationRevision = 0;
+  const messageLoads = new Map();
   const currentConversation = computed(() => conversations.value[currentId.value]);
   const currentRole = computed(() => currentConversation.value?.current_role_id);
   const currentRoleMeta = computed(() => options.value?.roles.find((role) => role.id === currentRole.value));
@@ -56,35 +58,41 @@ export const useSessionStore = defineStore("chat", () => {
     else list[index] = item;
     list.sort((a, b) => a.seq - b.seq);
   };
-  const loadMessages = async (id, older = false) => {
+  const loadMessages = (id, older = false) => {
+    if (messageLoads.has(id)) return messageLoads.get(id);
     pages.value[id] ||= { loading: false, has_more: false };
     const page = pages.value[id];
-    if (page.loading) return;
     page.loading = true;
-    try {
-      const streamingId = generation?.conversationId === id ? generation.messageId : null;
-      const before = older ? messagesByConversation.value[id]?.[0]?.seq : null;
-      const result = await api(`/conversations/${id}/messages?limit=100${before ? `&before_seq=${before}` : ""}`);
-      if (!conversations.value[id]) return;
-      const activeId = generation?.conversationId === id ? generation.messageId : streamingId;
-      const active = activeId && messagesByConversation.value[id]?.find((item) => item.id === activeId);
-      const combined = new Map((older ? messagesByConversation.value[id] || [] : []).map((item) => [item.id, item]));
-      result.items.forEach((item) => combined.set(item.id, item));
-      // A database snapshot during a stream can lag behind its live deltas.
-      if (active) combined.set(active.id, active);
-      messagesByConversation.value[id] = [...combined.values()].sort((a, b) => a.seq - b.seq);
-      page.has_more = result.has_more;
-    } finally { page.loading = false; }
+    const pending = (async () => {
+      try {
+        const streamingId = generation?.conversationId === id ? generation.messageId : null;
+        const before = older ? messagesByConversation.value[id]?.[0]?.seq : null;
+        const result = await api(`/conversations/${id}/messages?limit=100${before ? `&before_seq=${before}` : ""}`);
+        if (!conversations.value[id]) return;
+        const activeId = generation?.conversationId === id ? generation.messageId : streamingId;
+        const active = activeId && messagesByConversation.value[id]?.find((item) => item.id === activeId);
+        const combined = new Map((older ? messagesByConversation.value[id] || [] : []).map((item) => [item.id, item]));
+        result.items.forEach((item) => combined.set(item.id, item));
+        // A database snapshot during a stream can lag behind its live deltas.
+        if (active) combined.set(active.id, active);
+        messagesByConversation.value[id] = [...combined.values()].sort((a, b) => a.seq - b.seq);
+        page.has_more = result.has_more;
+      } finally { page.loading = false; messageLoads.delete(id); }
+    })();
+    messageLoads.set(id, pending);
+    return pending;
   };
   const selectConversation = async (id) => {
+    navigationRevision += 1;
     currentId.value = id; remember();
-    if (!messagesByConversation.value[id]) await loadMessages(id);
+    if (!messagesByConversation.value[id] || pages.value[id]?.loading) await loadMessages(id);
   };
   const newConversation = async () => {
+    const revision = ++navigationRevision;
     const item = await api("/conversations", { method: "POST", body: {} });
     upsertConversation(item);
     messagesByConversation.value[item.id] ||= [];
-    await selectConversation(item.id);
+    if (revision === navigationRevision) await selectConversation(item.id);
     return item;
   };
   const refreshConversations = async () => {
@@ -148,6 +156,7 @@ export const useSessionStore = defineStore("chat", () => {
     if (generation) throw new Error("请等待当前回复完成或先停止生成");
     if (!configured.value) throw new Error("请先在 API Key 设置中配置密钥");
     const conversationId = target?.conversation_id || currentId.value;
+    if (pages.value[conversationId]?.loading) throw new Error("请等待对话历史加载完成后再生成回复");
     const run = {
       conversationId, requestId: crypto.randomUUID(), messageId: null,
       controller: markRaw(new AbortController()), terminal: false, cancelRequested: false,

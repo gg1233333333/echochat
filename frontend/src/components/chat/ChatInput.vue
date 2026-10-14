@@ -28,7 +28,7 @@ const acceptAttribute = computed(() =>
     .join(","),
 );
 const sendDisabled = computed(
-  () => !store.ready || store.isGenerating || (!inputText.value.trim() && !files.value.length),
+  () => !store.ready || store.pages[store.currentId]?.loading || store.isGenerating || (!inputText.value.trim() && !files.value.length),
 );
 const placeholder = "描述问题、任务，或一个还没成形的想法…";
 const formatSize = (size) =>

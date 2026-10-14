@@ -7,10 +7,10 @@ import { computed } from "vue";
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function fixture(t, rejection) {
+async function fixture(t, rejection, { selectInitial = true } = {}) {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { getItem: () => null, setItem: () => {} } });
   setActivePinia(createPinia());
-  let controller, requestId, cancelled = false, heldLoad;
+  let controller, requestId, cancelled = false, heldLoad, heldCreation;
   let saved = [];
   const conversation = (id, count = 0) => ({ id, title: id, current_role_id: "general", context_segment: "segment", message_count: count, preview: "", updated_at: "2026-10-13T00:00:00Z" });
   const user = () => ({ id: "user-1", conversation_id: "c1", seq: 1, role: "user", content: "问题", status: "completed", request_id: requestId, attachments: [] });
@@ -19,7 +19,11 @@ async function fixture(t, rejection) {
     if (path === "/api/options") return json({ roles: [{ id: "general" }], modes: [{ value: "thinking" }], attachments: {} });
     if (path === "/api/credentials/deepseek") return json({ configured: true });
     if (path === "/api/conversations?include_empty=true") return json({ items: [conversation("c1", saved.length), conversation("c2")] });
-    if (path === "/api/conversations" && init.method === "POST") return json(conversation("c2"));
+    if (path === "/api/conversations" && init.method === "POST") {
+      const response = json(conversation(heldCreation?.id || "c2"));
+      if (heldCreation) await heldCreation.promise;
+      return response;
+    }
     if (path.includes("/messages?limit=")) {
       const response = json({ items: path.includes("c1") ? saved : [], has_more: false });
       if (heldLoad) await heldLoad.promise;
@@ -43,7 +47,7 @@ async function fixture(t, rejection) {
   });
   const store = useSessionStore();
   await store.initialize();
-  await store.selectConversation("c1");
+  if (selectInitial) await store.selectConversation("c1");
   store.setDraftText("问题");
   const emit = (type, payload) => controller.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify({ request_id: requestId, conversation_id: "c1", ...payload })}\n\n`));
   return {
@@ -55,6 +59,11 @@ async function fixture(t, rejection) {
       heldLoad = {};
       heldLoad.promise = new Promise((resolve) => { heldLoad.release = resolve; });
       return () => { heldLoad.release(); heldLoad = null; };
+    },
+    holdCreation(id = "c3") {
+      heldCreation = { id };
+      heldCreation.promise = new Promise((resolve) => { heldCreation.release = resolve; });
+      return () => { heldCreation.release(); heldCreation = null; };
     },
   };
 }
@@ -153,4 +162,57 @@ test("a delayed history snapshot cannot overwrite a stream that finished meanwhi
   release(); await loading;
   assert.equal(f.store.messages[1].status, "completed");
   assert.equal(f.store.messages[1].content, "最终回复");
+});
+
+test("uncached history blocks generation and concurrent selections wait for its result", async (t) => {
+  const f = await fixture(t, false, { selectInitial: false });
+  const release = f.holdLoad();
+  const selecting = f.store.selectConversation("c1");
+  let selectedAgain = false, loadedAgain = false;
+  const reselecting = f.store.selectConversation("c1").then(() => { selectedAgain = true; });
+  const reloading = f.store.loadMessages("c1").then(() => { loadedAgain = true; });
+  f.store.setDraftText("等待历史的草稿");
+  f.store.addFiles([new File(["attachment"], "sample.txt")]);
+  const sending = f.store.send();
+  void sending.catch(() => {});
+  try {
+    await tick();
+    assert.equal(f.store.isGenerating, false);
+    await assert.rejects(sending, /等待.*历史.*加载/);
+    assert.equal(selectedAgain, false);
+    assert.equal(loadedAgain, false);
+    assert.equal(f.store.ready, true);
+    assert.equal(f.store.currentDraft.text, "等待历史的草稿");
+    assert.equal(f.store.currentDraft.files[0].name, "sample.txt");
+  } finally {
+    if (f.store.isGenerating) { f.start(); f.finish(); }
+    await sending.catch(() => {});
+    release();
+    await Promise.all([selecting, reselecting, reloading]);
+  }
+  assert.equal(f.store.pages.c1.loading, false);
+  const accepted = f.store.send();
+  await tick(); f.start(); f.finish(); await accepted;
+  assert.deepEqual(f.store.messages.map((item) => item.id), ["user-1", "answer-1"]);
+  assert.equal(f.store.messages[1].status, "completed");
+});
+
+test("a delayed new conversation is saved without replacing a later selection or draft", async (t) => {
+  const f = await fixture(t);
+  const release = f.holdCreation();
+  const creating = f.store.newConversation();
+  await f.store.selectConversation("c2");
+  f.store.setDraftText("后续选择的草稿");
+  f.store.addFiles([new File(["attachment"], "sample.txt")]);
+  release();
+  const created = await creating;
+  assert.equal(f.store.currentId, "c2");
+  assert.equal(f.store.currentDraft.text, "后续选择的草稿");
+  assert.equal(f.store.currentDraft.files[0].name, "sample.txt");
+  assert.equal(f.store.conversations[created.id].id, "c3");
+  await f.store.selectConversation(created.id);
+  assert.deepEqual(f.store.messages, []);
+  assert.equal(f.store.currentDraft.text, "");
+  await f.store.selectConversation("c2");
+  assert.equal(f.store.currentDraft.text, "后续选择的草稿");
 });

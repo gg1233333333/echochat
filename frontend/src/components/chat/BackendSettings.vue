@@ -34,7 +34,7 @@ watch(importDialog, (open) => {
 const settingsCommand = (command) => {
   if (busy.value) return;
   if (command === "key") keyDialog.value = true;
-  else if (command === "import") importDialog.value = true;
+  else if (command === "import" && !store.isGenerating) importDialog.value = true;
   else if (command === "clear") emit("clear-history");
   else if (command === "opening" && !store.isGenerating) emit("replay-opening");
 };
@@ -72,12 +72,17 @@ const clearKey = async () => {
   }
 };
 const importSnapshot = async (source) => {
-  if (busy.value) return;
+  if (busy.value || store.isGenerating) return;
   busy.value = true;
   importResult.value = "";
   importError.value = "";
   try {
-    const result = await store.importHistory(JSON.parse(await source));
+    const snapshot = JSON.parse(await source);
+    if (store.isGenerating) {
+      importError.value = "请等待当前回复完成或停止生成后再导入记录";
+      return;
+    }
+    const result = await store.importHistory(snapshot);
     importResult.value = `已导入 ${result.imported_conversations} 个对话、${result.imported_messages} 条消息，跳过 ${result.skipped_conversations} 个已导入对话。`;
   } catch (error) {
     importError.value = error instanceof SyntaxError ? "文件不是有效的 JSON 快照" : error.message;
@@ -86,7 +91,7 @@ const importSnapshot = async (source) => {
   }
 };
 const importCurrent = () => {
-  if (busy.value) return;
+  if (busy.value || store.isGenerating) return;
   const snapshot = localStorage.getItem("session");
   if (snapshot) importSnapshot(snapshot);
   else importError.value = "当前地址没有旧版记录，请选择旧页面导出的 JSON 文件";
@@ -94,7 +99,7 @@ const importCurrent = () => {
 const chooseImport = (event) => {
   const file = event.target.files?.[0];
   event.target.value = "";
-  if (!file || busy.value) return;
+  if (!file || busy.value || store.isGenerating) return;
   importSnapshot(
     file.text().catch(() => {
       throw new Error("无法读取导入文件");
@@ -145,7 +150,9 @@ const exportLegacy = () => {
           <el-dropdown-item command="key" :icon="Key"
             >API Key 设置 · {{ store.configured ? "已保存" : "未配置" }}</el-dropdown-item
           >
-          <el-dropdown-item command="import" :icon="Upload">导入旧记录</el-dropdown-item>
+          <el-dropdown-item command="import" :icon="Upload" :disabled="store.isGenerating"
+            >导入旧记录</el-dropdown-item
+          >
           <el-dropdown-item
             command="opening"
             :icon="RefreshRight"
@@ -230,12 +237,19 @@ const exportLegacy = () => {
       快照。原缓存保留，相同快照重复导入会跳过。
     </p>
     <div class="import-actions">
-      <el-button :disabled="!hasLegacy || busy" @click="importCurrent">导入当前旧缓存</el-button>
-      <el-button :disabled="busy" @click="importFile?.click()">导入 JSON 文件</el-button>
+      <el-button :disabled="!hasLegacy || busy || store.isGenerating" @click="importCurrent"
+        >导入当前旧缓存</el-button
+      >
+      <el-button :disabled="busy || store.isGenerating" @click="importFile?.click()"
+        >导入 JSON 文件</el-button
+      >
       <el-button text :disabled="!hasLegacy || busy" @click="exportLegacy">导出旧缓存</el-button>
     </div>
     <p v-if="!hasLegacy" class="settings-note">
       当前地址未发现旧缓存；从原 vue-llm 页面导出的文件可在此导入，操作方法见项目 README。
+    </p>
+    <p v-if="store.isGenerating" class="settings-note" role="status">
+      请等待当前回复完成或停止生成后再导入记录。
     </p>
     <el-alert v-if="importResult" :title="importResult" type="success" :closable="false" />
     <el-alert
@@ -251,7 +265,7 @@ const exportLegacy = () => {
       ref="importFile"
       type="file"
       accept=".json,application/json"
-      :disabled="busy"
+      :disabled="busy || store.isGenerating"
       hidden
       @change="chooseImport"
     />

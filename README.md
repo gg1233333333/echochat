@@ -106,6 +106,7 @@ $env:ECHOCHAT_TEST_URL = 'http://127.0.0.1:5174'
 uv run --project backend --with playwright python tests/browser_smoke.py
 uv run --project backend --with playwright python tests/browser_layout.py
 uv run --project backend --with playwright python tests/browser_opening.py
+uv run --project backend --with playwright python tests/browser_streaming.py
 ```
 
 Windows 默认使用已安装的 Edge；其他系统需要 Playwright Chromium。模拟测试验证应用行为，真实 DeepSeek 连通性需要在页面填写有效密钥验证。

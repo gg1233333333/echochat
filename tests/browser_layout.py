@@ -14,7 +14,14 @@ TEST_KEY = "echochat-browser-test-key"
 TITLE = "设计更舒适的聊天界面"
 YESTERDAY_TITLE = "昨天的写作讨论"
 EARLIER_TITLE = "更早的信息整理"
-VIEWPORTS = ((1440, 900), (1920, 1080), (1024, 768), (390, 844), (320, 700), (1440, 560))
+VIEWPORTS = (
+    (1440, 900),
+    (1920, 1080),
+    (1024, 768),
+    (390, 844),
+    (320, 700),
+    (1440, 560),
+)
 ANSWER = """## 让注意力回到对话
 
 **阅读空间**应围绕内容安排。顶部只保留主题和回答方式，侧栏用于快速找到历史对话。
@@ -50,6 +57,15 @@ ANSWER = ANSWER.replace(
     + " | ".join(["清晰的示例内容abcdef123456"] * 12)
     + " |",
 )
+CHINESE_TABLE = (
+    "| 记录 ID | 员工 | 站点 / 站长 | 当前负责人 |\n"
+    "| --- | --- | --- | --- |\n"
+    + "\n".join(
+        f"| {240001 + index} | 员工甲（2019-01-17入职，复训有） | 示例服务站，站长乙 | 负责人丙 |"
+        for index in range(8)
+    )
+)
+ANSWER = ANSWER.replace("历史摘要应该显示", CHINESE_TABLE + "\n\n历史摘要应该显示")
 ANSWER += "\n\n" + "\n\n".join(
     f"第 {index + 1} 个阅读要点：保持清楚的段落层次，让内容自然展开。"
     "阅读长回答时，页面应保留输入入口，代码与宽表格仅在自身区域滚动。"
@@ -165,7 +181,11 @@ def first_send(page, context, empty_id, width):
     textarea.evaluate("element => { window.__layoutTextarea = element; }")
     name = f"layout-note-{width}.txt"
     page.locator("input.file-input").set_input_files(
-        {"name": name, "mimeType": "text/plain", "buffer": b"A local layout test attachment."}
+        {
+            "name": name,
+            "mimeType": "text/plain",
+            "buffer": b"A local layout test attachment.",
+        }
     )
     expect(page.locator(".attachment-chip")).to_contain_text(name)
     textarea.fill("请说明这份布局测试附件。")
@@ -181,7 +201,11 @@ def first_send(page, context, empty_id, width):
     textarea.evaluate("element => element.setSelectionRange(6, 6)")
     followup = f"followup-{width}.txt"
     page.locator("input.file-input").set_input_files(
-        {"name": followup, "mimeType": "text/plain", "buffer": b"Keep this new draft attachment."}
+        {
+            "name": followup,
+            "mimeType": "text/plain",
+            "buffer": b"Keep this new draft attachment.",
+        }
     )
     expect(page.get_by_role("button", name="发送", exact=True)).to_be_visible(timeout=20000)
     expect(textarea).to_have_value("后续草稿与光标保持原位")
@@ -275,6 +299,60 @@ def check_mode_menu(page, width, theme):
     return styles["background"]
 
 
+def check_compact_mobile_controls(page, width, height):
+    title = page.get_by_role("button", name="重命名对话", exact=True)
+    title.focus()
+    title.press("Enter")
+    editor = page.locator(".title-input input")
+    expect(editor).to_be_focused()
+    editor.dispatch_event("keydown", {"key": "Enter", "code": "Enter", "isComposing": True})
+    expect(editor).to_be_focused()
+    if width < 768:
+        expect(page.locator(".model-select")).not_to_be_visible()
+        expect(page.get_by_role("button", name="定位对话", exact=True)).not_to_be_visible()
+        assert editor.bounding_box()["width"] >= 120
+        assert page.locator(".title-input .el-input__wrapper").bounding_box()["height"] >= 44
+        page.screenshot(
+            path=str(RESULTS / f"ui-title-editor-{width}-{height}.png"),
+            animations="disabled",
+        )
+    editor.press("Escape")
+    expect(title).to_be_focused()
+    title.press("Enter")
+    expect(editor).to_be_focused()
+    editor.press("Enter")
+    expect(editor).not_to_be_visible()
+    expect(title).to_be_focused()
+    if width < 768:
+        navigation = page.get_by_role("button", name="定位对话", exact=True)
+        expect(navigation).to_be_visible()
+        header = rect(page, ".header")
+        control = navigation.bounding_box()
+        assert (
+            control["y"] >= header["y"]
+            and control["y"] + control["height"] <= header["y"] + header["height"]
+        )
+        assert control["x"] + control["width"] <= width
+        assert abs(rect(page, ".content")["y"] - header["y"] - header["height"]) < 2
+    table = page.locator(".assistant-message .message-body table").nth(1)
+    sizes = table.evaluate("""element => ({
+        width:element.clientWidth, scroll:element.scrollWidth,
+        cells:[...element.querySelectorAll('th')].map(cell=>cell.getBoundingClientRect().width),
+        header:element.querySelector('thead').getBoundingClientRect().height,
+        rows:[...element.querySelectorAll('tbody tr')].map(row=>row.getBoundingClientRect().height)
+    })""")
+    assert min(sizes["cells"]) >= 140, sizes
+    assert sizes["header"] < 55 and max(sizes["rows"]) < 90, sizes
+    if width < 768:
+        assert sizes["scroll"] > sizes["width"], sizes
+        table.scroll_into_view_if_needed()
+        page.screenshot(
+            path=str(RESULTS / f"ui-readable-table-{width}-{height}.png"),
+            animations="disabled",
+        )
+    no_page_overflow(page)
+
+
 def check_reading_layout(page, width):
     check_scroll_follow(page)
     page.locator(".content").evaluate("element => { element.scrollTop = 0; }")
@@ -344,7 +422,11 @@ def check_reading_layout(page, width):
 def check_upload_warning(page, context, width):
     calls = len(context.request.get(BASE_URL + "/api/test/requests").json()["items"])
     page.locator("input.file-input").set_input_files(
-        {"name": "bad.exe", "mimeType": "application/octet-stream", "buffer": b"Unsupported file."}
+        {
+            "name": "bad.exe",
+            "mimeType": "application/octet-stream",
+            "buffer": b"Unsupported file.",
+        }
     )
     warning = page.locator(".el-message--warning")
     expect(warning).to_be_visible()
@@ -475,11 +557,15 @@ def run():
             no_page_overflow(page)
             if (width, height) == (1440, 900):
                 page.screenshot(
-                    path=str(RESULTS / "ui-empty-light.png"), full_page=True, animations="disabled"
+                    path=str(RESULTS / "ui-empty-light.png"),
+                    full_page=True,
+                    animations="disabled",
                 )
             if width == 390:
                 page.screenshot(
-                    path=str(RESULTS / "ui-empty-mobile.png"), full_page=True, animations="disabled"
+                    path=str(RESULTS / "ui-empty-mobile.png"),
+                    full_page=True,
+                    animations="disabled",
                 )
             check_navigation(page, width)
             light_dialog = check_key_dialog(page, width)
@@ -506,6 +592,7 @@ def run():
                 has=page.locator(".conversation-item__title", has_text=TITLE)
             ).locator(".conversation-select").click()
             check_reading_layout(page, width)
+            check_compact_mobile_controls(page, width, height)
             light_menu = check_mode_menu(page, width, "light")
             page.screenshot(
                 path=str(RESULTS / f"unified-layout-{width}-{height}.png"),
@@ -514,11 +601,15 @@ def run():
             )
             if (width, height) == (1440, 900):
                 page.screenshot(
-                    path=str(RESULTS / "ui-long-light.png"), full_page=True, animations="disabled"
+                    path=str(RESULTS / "ui-long-light.png"),
+                    full_page=True,
+                    animations="disabled",
                 )
             if width == 390:
                 page.screenshot(
-                    path=str(RESULTS / "ui-mobile.png"), full_page=True, animations="disabled"
+                    path=str(RESULTS / "ui-mobile.png"),
+                    full_page=True,
+                    animations="disabled",
                 )
             textarea.fill("主题切换后保留草稿")
             page.emulate_media(color_scheme="dark")
@@ -536,7 +627,9 @@ def run():
             )
             if (width, height) == (1440, 900):
                 page.screenshot(
-                    path=str(RESULTS / "ui-dark.png"), full_page=True, animations="disabled"
+                    path=str(RESULTS / "ui-dark.png"),
+                    full_page=True,
+                    animations="disabled",
                 )
             check_upload_warning(page, context, width)
             assert TEST_KEY not in page.evaluate("JSON.stringify(localStorage)")
