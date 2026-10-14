@@ -1,70 +1,276 @@
+<script setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { ElMessage } from "element-plus";
+import { CircleClose, Close, Key, Microphone, Paperclip, Promotion } from "@element-plus/icons-vue";
+import { useSessionStore } from "@/stores/session";
+import { useSpeechInput } from "@/composables/useSpeechInput";
+
+const emit = defineEmits(["submit"]);
+const store = useSessionStore();
+const textarea = ref(null);
+const composerColumn = ref(null);
+const composerExtras = ref(null);
+const fileInput = ref(null);
+const composing = ref(false);
+const fileFeedback = ref("");
+const speechError = ref("");
+let resizeObserver;
+let columnWidth = 0;
+const inputText = computed({
+  get: () => store.currentDraft.text,
+  set: (value) => store.setDraftText(value),
+});
+const files = computed(() => store.currentDraft.files);
+const limits = computed(() => store.options?.attachments);
+const acceptAttribute = computed(() =>
+  limits.value?.extensions
+    .map((extension) => (extension.startsWith(".") ? extension : `.${extension}`))
+    .join(","),
+);
+const sendDisabled = computed(
+  () => !store.ready || store.isGenerating || (!inputText.value.trim() && !files.value.length),
+);
+const placeholder = "描述问题、任务，或一个还没成形的想法…";
+const formatSize = (size) =>
+  size < 1024
+    ? `${size}B`
+    : size < 1024 * 1024
+      ? `${(size / 1024).toFixed(1)}KB`
+      : `${(size / 1024 / 1024).toFixed(1)}MB`;
+const resize = () => {
+  if (!textarea.value) return;
+  const maxHeight = Math.max(48, 164 - (composerExtras.value?.offsetHeight || 0));
+  textarea.value.style.height = "auto";
+  textarea.value.style.height = `${Math.min(textarea.value.scrollHeight, maxHeight)}px`;
+};
+const { supported, starting, recording, preview, stop, toggle } = useSpeechInput(
+  (text) => {
+    inputText.value = `${inputText.value} ${text}`.trim();
+  },
+  (message) => {
+    speechError.value = message;
+    ElMessage.error(message);
+  },
+);
+const toggleSpeech = () => {
+  speechError.value = "";
+  toggle();
+};
+const handleSubmit = () => {
+  if (sendDisabled.value) return;
+  if (!store.configured) {
+    store.keySettingsOpen = true;
+    return;
+  }
+  stop();
+  emit("submit");
+};
+const handleEnter = (event) => {
+  if (event.isComposing || composing.value || event.keyCode === 229 || event.shiftKey) return;
+  event.preventDefault();
+  handleSubmit();
+};
+const handleFileChange = (event) => {
+  const selected = Array.from(event.target.files || []);
+  event.target.value = "";
+  if (!limits.value) return;
+  const warnings = [];
+  fileFeedback.value = "";
+  const warn = (message) => {
+    warnings.push(message);
+    ElMessage.warning(message);
+  };
+  const accepted = [];
+  let total = files.value.reduce((sum, file) => sum + file.size, 0);
+  for (const file of selected) {
+    const extension = file.name.split(".").pop().toLowerCase();
+    if (!limits.value.extensions.some((item) => item.replace(/^\./, "") === extension)) {
+      warn(`${file.name} 的文件类型不支持`);
+      continue;
+    }
+    if (file.size > limits.value.max_file_bytes) {
+      warn(`${file.name} 超过 ${formatSize(limits.value.max_file_bytes)}`);
+      continue;
+    }
+    if (
+      files.value.length + accepted.length >= limits.value.max_files ||
+      total + file.size > limits.value.max_total_bytes
+    ) {
+      warn(
+        `每次最多 ${limits.value.max_files} 个文件，总大小不超过 ${formatSize(limits.value.max_total_bytes)}`,
+      );
+      break;
+    }
+    accepted.push(file);
+    total += file.size;
+  }
+  fileFeedback.value = warnings.join("；");
+  store.addFiles(accepted);
+};
+const stopGeneration = () => store.cancelGeneration().catch(store.reportError);
+watch(
+  () => store.currentId,
+  () => {
+    stop();
+    fileFeedback.value = "";
+    speechError.value = "";
+  },
+);
+watch(
+  () => store.isGenerating,
+  (active) => {
+    if (active) stop();
+  },
+);
+watch(inputText, () => nextTick(resize));
+watch(
+  () => [files.value.length, preview.value, fileFeedback.value, speechError.value],
+  () => nextTick(resize),
+);
+onMounted(() => {
+  resize();
+  resizeObserver = new ResizeObserver(([entry]) => {
+    if (entry.contentRect.width === columnWidth) return;
+    columnWidth = entry.contentRect.width;
+    resize();
+  });
+  resizeObserver.observe(composerColumn.value);
+});
+onBeforeUnmount(() => resizeObserver?.disconnect());
+</script>
+
 <template>
   <div class="container">
-    <div class="input-area">
-      <textarea
-        ref="textarea"
-        v-model="inputText"
-        class="inputbox"
-        :placeholder="placeholder"
-        @input="resize"
-        @keydown.enter.prevent="handleEnter"
-      ></textarea>
-
-      <transition-group name="fade" tag="div" class="attachments" v-if="attachments.length">
-        <div v-for="file in attachments" :key="file.id" class="attachment-chip">
-          <el-icon class="attachment-icon"><Paperclip /></el-icon>
-          <div class="attachment-meta">
-            <span class="attachment-name">{{ file.name }}</span>
-            <span class="attachment-size">{{ formatSize(file.size) }}</span>
+    <div ref="composerColumn" class="composer-column">
+      <div class="composer-frame">
+        <textarea
+          ref="textarea"
+          v-model="inputText"
+          class="inputbox"
+          rows="1"
+          :placeholder="placeholder"
+          :disabled="!store.ready"
+          aria-label="消息输入"
+          @input="resize"
+          @keydown.enter="handleEnter"
+          @compositionstart="composing = true"
+          @compositionend="composing = false"
+        ></textarea>
+        <div ref="composerExtras" class="composer-extras">
+          <transition-group
+            v-if="files.length"
+            name="fade"
+            tag="div"
+            class="attachments"
+            @after-enter="resize"
+            @after-leave="resize"
+          >
+            <div
+              v-for="(file, index) in files"
+              :key="`${file.name}-${index}`"
+              class="attachment-chip"
+            >
+              <el-icon class="attachment-icon"><Paperclip /></el-icon>
+              <div class="attachment-meta">
+                <span class="attachment-name">{{ file.name }}</span
+                ><span class="attachment-size"
+                  >{{ file.type || file.name.split(".").pop().toUpperCase() }} ·
+                  {{ formatSize(file.size) }} · 随消息发送</span
+                >
+              </div>
+              <button
+                class="attachment-remove"
+                type="button"
+                :aria-label="`移除 ${file.name}`"
+                @click="store.removeFile(index)"
+              >
+                <el-icon><Close /></el-icon>
+              </button>
+            </div>
+          </transition-group>
+          <div v-if="preview" class="speech-preview">
+            <el-icon><Microphone /></el-icon><span>{{ preview }}</span>
           </div>
-          <button class="attachment-remove" type="button" @click="removeAttachment(file.id)">
-            <el-icon><Close /></el-icon>
-          </button>
+          <p v-if="fileFeedback" class="composer-feedback" role="alert">
+            <span>{{ fileFeedback }}</span>
+            <button type="button" aria-label="关闭文件提示" @click="fileFeedback = ''">
+              <el-icon><Close /></el-icon>
+            </button>
+          </p>
+          <p v-if="speechError" class="composer-feedback" role="alert">
+            <span>{{ speechError }}</span>
+            <button type="button" aria-label="关闭语音提示" @click="speechError = ''">
+              <el-icon><Close /></el-icon>
+            </button>
+          </p>
         </div>
-      </transition-group>
-
-      <div v-if="speechPreview" class="speech-preview">
-        <el-icon><Microphone /></el-icon>
-        <span>{{ speechPreview }}</span>
+        <div class="toolbar">
+          <el-tooltip content="上传文件" placement="top"
+            ><button
+              class="toolbar-btn"
+              type="button"
+              aria-label="上传文件"
+              :disabled="!store.ready"
+              @click="fileInput?.click()"
+            >
+              <el-icon><Paperclip /></el-icon><span>上传文件</span>
+            </button></el-tooltip
+          >
+          <el-tooltip
+            :content="starting ? '取消语音启动' : recording ? '停止语音' : '语音输入'"
+            placement="top"
+            ><button
+              v-if="supported"
+              class="toolbar-btn"
+              :class="{ recording }"
+              type="button"
+              :aria-label="starting ? '取消语音启动' : recording ? '停止语音' : '语音输入'"
+              :disabled="store.isGenerating || !store.ready"
+              @click="toggleSpeech"
+            >
+              <el-icon><Microphone /></el-icon
+              ><span>{{ starting ? "启动中…" : recording ? "停止语音" : "语音输入" }}</span>
+            </button></el-tooltip
+          >
+          <div class="action-area">
+            <button
+              v-if="!store.configured && !store.isGenerating"
+              class="send-button"
+              type="button"
+              aria-label="配置 API Key"
+              :disabled="!store.ready"
+              @click="store.keySettingsOpen = true"
+            >
+              <span class="action-label">配置 API Key</span><el-icon><Key /></el-icon>
+            </button>
+            <button
+              v-else-if="!store.isGenerating"
+              class="send-button"
+              type="button"
+              aria-label="发送"
+              :disabled="sendDisabled"
+              @click="handleSubmit"
+            >
+              <span class="action-label">发送</span><el-icon><Promotion /></el-icon>
+            </button>
+            <button
+              v-else
+              class="stop-button"
+              type="button"
+              :aria-label="store.activeGeneration?.cancelling ? '停止中…' : '停止'"
+              :disabled="store.activeGeneration?.cancelling"
+              @click="stopGeneration"
+            >
+              <span class="action-label">{{
+                store.activeGeneration?.cancelling ? "停止中…" : "停止"
+              }}</span
+              ><el-icon class="stop-icon"><CircleClose /></el-icon>
+            </button>
+          </div>
+        </div>
       </div>
-
-      <div class="toolbar">
-        <button class="toolbar-btn" type="button" @click="triggerFilePicker">
-          <el-icon><UploadFilled /></el-icon>
-          <span>上传文件</span>
-        </button>
-        <button
-          v-if="isSpeechSupported"
-          class="toolbar-btn"
-          :class="{ recording: isRecording }"
-          type="button"
-          @click="toggleRecording"
-          :disabled="isTyping"
-        >
-          <el-icon><Microphone /></el-icon>
-          <span>{{ isRecording ? "停止语音" : "语音输入" }}</span>
-        </button>
-        <span class="toolbar-hint">Shift + Enter 换行</span>
-      </div>
+      <p class="toolbar-hint">Enter 发送 · Shift + Enter 换行</p>
     </div>
-
-    <div class="action-area">
-      <button
-        v-if="!isTyping"
-        class="send-button"
-        type="button"
-        :disabled="sendDisabled"
-        @click="handleSubmit"
-      >
-        <span>发送</span>
-        <el-icon><Promotion /></el-icon>
-      </button>
-      <button v-else class="stop-button" type="button" @click="stopGeneration">
-        停止
-        <el-icon class="stop-icon"><CircleClose /></el-icon>
-      </button>
-    </div>
-
     <input
       ref="fileInput"
       class="file-input"
@@ -76,811 +282,305 @@
   </div>
 </template>
 
-<script setup>
-import {
-  CircleClose,
-  Close,
-  Microphone,
-  Paperclip,
-  Promotion,
-  UploadFilled,
-} from "@element-plus/icons-vue";
-import { ElMessage, ElMessageBox } from "element-plus";
-import JSZip from "jszip";
-import {
-  computed,
-  defineEmits,
-  defineProps,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-} from "vue";
-
-import { abortStream } from "@/apis/deepseek";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
-import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
-
-defineOptions({ name: "ChatInput" });
-
-if (pdfjsLib?.GlobalWorkerOptions) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
-}
-
-const props = defineProps({
-  msg: {
-    type: String,
-    default: "",
-  },
-  isTyping: {
-    type: Boolean,
-    default: false,
-  },
-});
-
-const emit = defineEmits(["update:msg", "update:isTyping", "submit"]);
-
-/**
- * 文本输入框的双向绑定代理，直接透传给父组件维护的状态，
- * 方便 ChatMessage 统一管理消息体。
- */
-const inputText = computed({
-  get: () => props.msg,
-  set: (val) => emit("update:msg", val),
-});
-
-/**
- * 父组件会告知当前是否在生成回答，根据该状态控制按钮和语音录制。
- */
-const isTyping = computed({
-  get: () => props.isTyping,
-  set: (val) => emit("update:isTyping", val),
-});
-
-const textarea = ref(null);
-const fileInput = ref(null);
-const attachments = ref([]);
-const speechPreview = ref("");
-const isRecording = ref(false);
-const recognition = ref(null);
-
-/**
- * 允许上传的文件扩展名，涵盖常见文本、文档以及代码类型。
- */
-const ALLOWED_EXTENSIONS = new Set([
-  "txt",
-  "md",
-  "csv",
-  "json",
-  "log",
-  "pdf",
-  "doc",
-  "docx",
-  "xml",
-  "yml",
-  "yaml",
-  "html",
-  "css",
-  "scss",
-  "less",
-  "js",
-  "jsx",
-  "ts",
-  "tsx",
-  "vue",
-  "py",
-  "java",
-  "c",
-  "cpp",
-  "cc",
-  "h",
-  "hpp",
-  "cs",
-  "php",
-  "rb",
-  "go",
-  "rs",
-  "kt",
-  "swift",
-  "sql",
-  "sh",
-]);
-
-/**
- * 部分浏览器在读取文件时只提供 MIME Type，因此补充一份允许的类型列表。
- */
-const ALLOWED_MIME_TYPES = new Set([
-  "text/plain",
-  "text/csv",
-  "text/markdown",
-  "application/json",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/xml",
-  "text/xml",
-  "text/html",
-  "text/css",
-  "text/x-python",
-  "text/x-java-source",
-  "text/x-c",
-  "text/x-c++",
-  "text/x-script.python",
-  "application/javascript",
-  "text/javascript",
-]);
-
-/**
- * 文件选择框需要的 accept 属性，帮助用户只挑选受支持的格式。
- */
-const acceptAttribute = computed(() =>
-  Array.from(ALLOWED_EXTENSIONS)
-    .map((ext) => `.${ext}`)
-    .join(","),
-);
-
-const placeholder = computed(() =>
-  isSpeechSupported.value
-    ? "输入你的问题，或点击语音输入按钮试试看…"
-    : "输入你的问题…",
-);
-
-const sendDisabled = computed(
-  () => !inputText.value.trim() && attachments.value.length === 0,
-);
-
-const isSpeechSupported = computed(
-  () =>
-    typeof window !== "undefined" &&
-    ("webkitSpeechRecognition" in window || "SpeechRecognition" in window),
-);
-
-const resize = () => {
-  const el = textarea.value;
-  if (!el) return;
-
-  const minHeight = 120;
-  const maxHeight = 240;
-  el.style.height = "auto";
-  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
-  el.style.height = `${nextHeight}px`;
-  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
-};
-
-const formatSize = (size) => {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-};
-
-const MAX_FILE_SIZE = 8 * 1024 * 1024;
-const MAX_TEXT_PREVIEW = 8000;
-
-const createAttachmentId = () => {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-};
-
-const truncatePreview = (text = "") => {
-  const trimmed = text.trim();
-  const body = trimmed.slice(0, MAX_TEXT_PREVIEW);
-  const note =
-    trimmed.length > MAX_TEXT_PREVIEW
-      ? "内容已截断，仅展示前 8000 字符"
-      : "";
-  return { body, note };
-};
-
-const readAsPlainText = (file) =>
-  new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = (reader.result ?? "").toString();
-      resolve(truncatePreview(result));
-    };
-    reader.readAsText(file, "utf-8");
-  });
-
-const extractDocxText = async (file) => {
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const zip = await JSZip.loadAsync(arrayBuffer);
-    const documentFile = zip.file("word/document.xml");
-    if (!documentFile) {
-      return {
-        body: "",
-        note: "未能解析 DOCX 正文内容，已附带文件信息。",
-      };
-    }
-    const xml = await documentFile.async("string");
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xml, "application/xml");
-    const paragraphs = Array.from(doc.getElementsByTagName("w:p"));
-    const text = paragraphs
-      .map((p) =>
-        Array.from(p.getElementsByTagName("w:t"))
-          .map((node) => node.textContent)
-          .join(""),
-      )
-      .join("\n")
-      .replace(/\n{3,}/g, "\n\n");
-    if (!text.trim()) {
-      return {
-        body: "",
-        note: "DOCX 文件未检测到可提取的文本内容。",
-      };
-    }
-    return truncatePreview(text);
-  } catch (error) {
-    console.error("Failed to extract DOCX", error);
-    return {
-      body: "",
-      note: "解析 DOCX 文件时出错，已附带文件元信息。",
-    };
-  }
-};
-
-const extractPdfText = async (file) => {
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const chunks = [];
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const pageText = content.items
-        .map((item) => ("str" in item ? item.str : ""))
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (pageText) {
-        chunks.push(pageText);
-      }
-      if (chunks.join("\n\n").length > MAX_TEXT_PREVIEW * 1.5) {
-        break;
-      }
-    }
-    const combined = chunks.join("\n\n");
-    if (!combined.trim()) {
-      return {
-        body: "",
-        note: "PDF 文件未检测到可提取的文本内容。",
-      };
-    }
-    return truncatePreview(combined);
-  } catch (error) {
-    console.error("Failed to extract PDF", error);
-    return {
-      body: "",
-      note: "解析 PDF 文件时出错，已附带文件元信息。",
-    };
-  }
-};
-
-const readFileContent = async (file) => {
-  const name = file.name || "";
-  const type = file.type || "";
-
-  /**
-   * 读取纯文本或结构化文本类型，避免误判导致的编码问题。
-   */
-
-  if (
-    type.startsWith("text/") ||
-    type.includes("json") ||
-    /\.(md|txt|csv|json|log)$/i.test(name)
-  ) {
-    return readAsPlainText(file);
-  }
-
-  if (/\.docx$/i.test(name) || type.includes("officedocument.wordprocessingml")) {
-    return extractDocxText(file);
-  }
-
-  if (/\.pdf$/i.test(name) || type === "application/pdf") {
-    return extractPdfText(file);
-  }
-
-  return {
-    body: "",
-    note: "该文件为非文本格式，已附带元信息供参考。",
-  };
-};
-
-/**
- * 根据扩展名或 MIME Type 判断文件是否受支持。
- */
-const isFileTypeAllowed = (file) => {
-  const name = file.name || "";
-  const extension = name.split(".").pop()?.toLowerCase() || "";
-  const type = (file.type || "").toLowerCase();
-
-  if (extension && ALLOWED_EXTENSIONS.has(extension)) {
-    return true;
-  }
-
-  if (type && ALLOWED_MIME_TYPES.has(type)) {
-    return true;
-  }
-
-  return false;
-};
-
-/**
- * 当文件类型不在允许范围内时，弹出置中的警告弹窗进行说明。
- */
-const showUnsupportedFileAlert = (file) =>
-  ElMessageBox.alert(
-    `${file.name || "该文件"} 的格式暂不支持，请上传文本、文档或常见代码文件。`,
-    "文件类型不支持",
-    {
-      confirmButtonText: "我知道了",
-      center: true,
-    },
-  );
-
-const handleFileChange = async (event) => {
-  const files = Array.from(event.target.files || []);
-  if (!files.length) return;
-
-  for (const file of files) {
-    if (!isFileTypeAllowed(file)) {
-      await showUnsupportedFileAlert(file);
-      continue;
-    }
-
-    if (file.size > MAX_FILE_SIZE) {
-      ElMessage.warning(`${file.name} 超过 ${formatSize(MAX_FILE_SIZE)}，已忽略`);
-      continue;
-    }
-
-    const { body, note } = await readFileContent(file);
-    attachments.value.push({
-      id: createAttachmentId(),
-      name: file.name,
-      size: file.size,
-      type: file.type || "unknown",
-      body,
-      note,
-      addedAt: Date.now(),
-    });
-  }
-
-  event.target.value = "";
-  await nextTick();
-  resize();
-};
-
-const removeAttachment = (id) => {
-  attachments.value = attachments.value.filter((item) => item.id !== id);
-};
-
-const triggerFilePicker = () => {
-  fileInput.value?.click();
-};
-
-const handleSubmit = () => {
-  if (sendDisabled.value) return;
-  emit("submit", {
-    attachments: attachments.value.map((item) => ({ ...item })),
-  });
-  attachments.value = [];
-  speechPreview.value = "";
-  nextTick(() => {
-    resize();
-  });
-};
-
-const handleEnter = (event) => {
-  if (event.shiftKey) {
-    const el = textarea.value;
-    if (!el) return;
-    const { selectionStart, selectionEnd } = el;
-    const value = inputText.value;
-    const newValue = `${value.slice(0, selectionStart)}\n${value.slice(selectionEnd)}`;
-    inputText.value = newValue;
-    nextTick(() => {
-      el.selectionStart = el.selectionEnd = selectionStart + 1;
-      resize();
-    });
-    return;
-  }
-
-  handleSubmit();
-};
-
-const stopGeneration = () => {
-  abortStream();
-  isTyping.value = false;
-};
-
-const ensureRecognition = () => {
-  if (!isSpeechSupported.value || recognition.value) return;
-
-  const SpeechRecognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
-  const instance = new SpeechRecognition();
-  instance.lang = "zh-CN";
-  instance.interimResults = true;
-  instance.continuous = true;
-
-  instance.onresult = (event) => {
-    let finalText = "";
-    let interimText = "";
-
-    for (const result of event.results) {
-      if (result.isFinal) {
-        finalText += result[0].transcript;
-      } else {
-        interimText += result[0].transcript;
-      }
-    }
-
-    if (finalText) {
-      inputText.value = `${inputText.value} ${finalText}`.trim();
-      nextTick(resize);
-    }
-
-    speechPreview.value = interimText;
-  };
-
-  instance.onerror = () => {
-    stopRecording();
-  };
-
-  instance.onend = () => {
-    stopRecording();
-  };
-
-  recognition.value = instance;
-};
-
-const startRecording = () => {
-  if (!isSpeechSupported.value || isRecording.value) return;
-  ensureRecognition();
-  try {
-    recognition.value?.start();
-    isRecording.value = true;
-    speechPreview.value = "正在听…";
-  } catch (error) {
-    console.error(error);
-    ElMessage.error("无法启动语音识别");
-    isRecording.value = false;
-  }
-};
-
-const stopRecording = () => {
-  if (recognition.value && typeof recognition.value.stop === "function") {
-    recognition.value.stop();
-  }
-  isRecording.value = false;
-  speechPreview.value = "";
-};
-
-const toggleRecording = () => {
-  if (isRecording.value) {
-    stopRecording();
-  } else {
-    startRecording();
-  }
-};
-
-onMounted(() => {
-  resize();
-});
-
-onBeforeUnmount(() => {
-  stopRecording();
-});
-
-// 当内容被清空时重新计算高度，保持输入框紧凑
-watch(inputText, (value) => {
-  if (!value.trim()) {
-    nextTick(resize);
-  }
-});
-
-// 一旦开始生成回答立即停止语音识别，避免录音状态悬挂
-watch(isTyping, (value) => {
-  if (value) {
-    stopRecording();
-  }
-});
-</script>
-
 <style scoped>
 .container {
-  display: flex;
-  gap: 16px;
-  align-items: flex-end;
-  justify-content: space-between;
-  padding: 20px 24px;
-  background: var(--color-panel);
-  border-top: 1px solid var(--color-border);
-  position: relative;
+  flex-shrink: 0;
+  min-width: 0;
+  padding: 6px var(--chat-gutter);
+  background: transparent;
 }
-
-.container::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 24px;
-  right: 24px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--color-border), transparent);
-  opacity: 0.5;
+.composer-column {
+  width: 100%;
+  max-width: var(--chat-column-width);
+  margin: 0 auto;
 }
-
-.input-area {
-  flex: 1;
+.composer-frame {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.inputbox {
-  width: 100%;
-  min-height: 120px;
-  max-height: 240px;
-  font-size: 15px;
-  line-height: 1.6;
-  padding: 12px 16px;
-  border-radius: 16px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-composer);
   background: var(--color-input-background);
-  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
-  resize: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-  outline: none;
+  box-shadow: var(--shadow-composer, var(--shadow-soft));
+  overflow: hidden;
+  transition:
+    border-color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
-
-.inputbox:focus {
+.composer-frame:focus-within {
   border-color: var(--color-accent);
-  box-shadow: 0 4px 18px rgba(59, 130, 246, 0.18);
+  box-shadow:
+    0 0 0 3px var(--color-toolbar-bg),
+    var(--shadow-composer, var(--shadow-soft));
 }
-
+.inputbox {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  max-height: 164px;
+  padding: 12px var(--space-4);
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 16px;
+  line-height: 24px;
+}
+.inputbox::placeholder {
+  color: var(--color-text-secondary);
+}
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 0 var(--space-2) var(--space-1);
 }
-
 .toolbar-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
-  border-radius: 12px;
-  border: none;
-  background: var(--color-toolbar-bg);
-  color: var(--color-toolbar-text);
+  height: 36px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    color var(--motion-fast) ease,
+    background var(--motion-fast) ease,
+    transform var(--motion-fast) ease;
 }
-
-.toolbar-btn:hover {
-  background: var(--color-toolbar-hover-bg);
-  color: var(--color-accent-strong);
+.toolbar-btn .el-icon {
+  font-size: 18px;
 }
-
+.toolbar-btn:hover,
+.toolbar-btn:focus-visible {
+  background: var(--color-panel-alt);
+  color: var(--color-text-primary);
+}
+.toolbar-btn:focus-visible,
+.attachment-remove:focus-visible,
+.send-button:focus-visible,
+.stop-button:focus-visible,
+.composer-feedback button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.toolbar-btn:not(:disabled):active,
+.send-button:not(:disabled):active,
+.stop-button:not(:disabled):active {
+  transform: scale(0.96);
+}
 .toolbar-btn.recording {
   background: var(--color-stop-button-bg);
   color: var(--color-stop-button-text);
 }
-
 .toolbar-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
-
 .toolbar-hint {
-  margin-left: auto;
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+  text-align: center;
   font-size: 12px;
-  color: var(--color-toolbar-muted);
+  line-height: 16px;
 }
-
-.attachments {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.attachment-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 12px;
-  background: var(--color-toolbar-bg);
-  color: var(--color-text-secondary);
-  border: 1px solid rgba(59, 130, 246, 0.18);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
-}
-
-.attachment-icon {
-  font-size: 14px;
-}
-
-.attachment-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.attachment-name {
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.attachment-size {
-  font-size: 11px;
-  color: var(--color-muted);
-}
-
-.attachment-remove {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--color-muted);
-  transition: color 0.2s ease;
-}
-
-.attachment-remove:hover {
-  color: var(--color-danger);
-}
-
-.speech-preview {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: var(--color-toolbar-bg);
-  border: 1px solid rgba(59, 130, 246, 0.18);
-}
-
 .action-area {
   display: flex;
-  align-items: center;
+  margin-left: auto;
 }
-
 .send-button,
 .stop-button {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 24px;
-  height: 48px;
-  border-radius: 16px;
-  border: none;
+  justify-content: center;
+  gap: 6px;
+  min-width: 40px;
+  height: 36px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
-  font-size: 15px;
-  font-weight: 500;
-  transition: all 0.2s ease;
+  transition:
+    background var(--motion-fast) ease,
+    transform var(--motion-fast) ease;
 }
-
+.send-button .el-icon,
+.stop-button .el-icon {
+  font-size: 18px;
+}
 .send-button {
-  background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
+  background: var(--color-accent);
   color: var(--color-accent-contrast);
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
-  position: relative;
-  overflow: hidden;
 }
-
-.send-button::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.15), transparent);
-  transition: left 0.5s ease;
-}
-
-.send-button:not(:disabled):hover::before {
-  left: 100%;
-}
-
-.send-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-  box-shadow: none;
-}
-
 .send-button:not(:disabled):hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4);
+  background: var(--color-accent-strong);
 }
-
+.send-button:disabled,
+.stop-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .stop-button {
   background: var(--color-stop-button-bg);
   color: var(--color-stop-button-text);
-  box-shadow: 0 6px 12px var(--color-stop-button-shadow);
 }
-
-.stop-button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 18px var(--color-stop-button-shadow);
+.composer-extras {
+  max-height: 108px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
-
-.stop-icon {
-  font-size: 16px;
+.attachments {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding: 0 var(--space-3) var(--space-2);
+  overscroll-behavior: contain;
 }
-
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: min(360px, 100%);
+  padding: 5px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-panel-alt);
+  color: var(--color-text-secondary);
+}
+.attachment-icon {
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+.attachment-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 270px;
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+.attachment-size {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.attachment-remove:hover {
+  color: var(--color-danger);
+}
+.speech-preview {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.composer-feedback {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-3) var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-control);
+  color: var(--color-danger);
+  background: var(--color-stop-button-bg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.composer-feedback span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.composer-feedback button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
 .file-input {
   display: none;
 }
-
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.2s ease;
+  transition: opacity var(--motion-fast) ease;
 }
-
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
 }
-
-@media (max-width: 960px) {
+@media (max-width: 767px) {
   .container {
-    flex-direction: column;
-    align-items: stretch;
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
   }
-
-  .action-area {
-    justify-content: flex-end;
-  }
-}
-
-@media (max-width: 768px) {
-  .container {
-    padding: 16px 18px;
-    gap: 12px;
-  }
-
-  .toolbar {
-    gap: 10px;
-  }
-
+  .toolbar-btn span,
+  .action-label,
   .toolbar-hint {
-    margin-left: 0;
-    width: 100%;
-    text-align: right;
-  }
-
-  .action-area {
-    width: 100%;
-  }
-
-  .send-button,
-  .stop-button {
-    width: 100%;
-    justify-content: center;
-  }
-}
-
-@media (max-width: 480px) {
-  .container {
-    padding: 14px 14px;
-  }
-
-  .toolbar-btn span {
     display: none;
   }
-
-  .toolbar-hint {
-    font-size: 11px;
+  .toolbar-btn,
+  .send-button,
+  .stop-button {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+  .attachment-remove,
+  .composer-feedback button {
+    width: 44px;
+    height: 44px;
+  }
+  .attachment-chip {
+    max-width: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-frame,
+  .toolbar-btn,
+  .send-button,
+  .stop-button,
+  .fade-enter-active,
+  .fade-leave-active {
+    transition: none;
   }
 }
 </style>

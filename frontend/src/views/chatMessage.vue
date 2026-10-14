@@ -1,1226 +1,1229 @@
 <script setup>
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  onUpdated,
-  ref,
-  watch,
-} from "vue";
-import MarkdownIt from "markdown-it";
-import hljs from "highlight.js";
-import "highlight.js/styles/github.css";
-import { markdownItTable } from "markdown-it-table";
+import { computed, nextTick, ref, watch } from "vue";
+import { ElMessage, ElMessageBox } from "element-plus";
 import {
   CopyDocument,
-  EditPen,
   Close,
   Delete,
   RefreshRight,
   DocumentCopy,
+  ArrowRight,
+  MoreFilled,
+  Menu,
+  Check,
 } from "@element-plus/icons-vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
-
-import { chatStream } from "@/apis/deepseek";
-import { createStreamQueue } from "@/utils/streamQueue";
-import {
-  getAllRoles,
-  getRoleById,
-  isDeveloperMode,
-  isLikelyNonTechnical,
-} from "@/utils/aiRoles";
+import { renderMarkdown, markdownPlainText } from "@/utils/markdown";
 import AttachmentPreview from "@/components/chat/AttachmentPreview.vue";
 import ChatInput from "@/components/chat/ChatInput.vue";
+import ConversationNavigator from "@/components/chat/ConversationNavigator.vue";
 import { useSessionStore } from "@/stores/session";
-import userAvatar from "@/assets/avatars/user.svg";
+import { useStreamingDisplay } from "@/composables/useStreamingDisplay";
+import { useConversationNavigation } from "@/composables/useConversationNavigation";
 import assistantAvatarGeneral from "@/assets/avatars/assistant.svg";
-import assistantAvatarDeveloper from "@/assets/avatars/faviconcode.svg";
 
 defineOptions({ name: "ChatMessage" });
-
-const sessionStore = useSessionStore();
-const msg = ref("");
-const isTyping = ref(false);
+defineProps({ sidebarOpen: Boolean, brandInHeader: Boolean });
+const emit = defineEmits(["toggle-sidebar"]);
+const store = useSessionStore();
+const scroller = ref(null);
+const autoScroll = ref(true);
+const navigationPaused = ref(false);
 const showNewMessageIndicator = ref(false);
-
-const streamQueue = createStreamQueue();
-
-const selectedModel = computed({
-  get: () => sessionStore.model,
-  set: (value) => sessionStore.setModel(value),
+const isEditingTitle = ref(false);
+const titleButton = ref(null);
+const editingId = ref(null);
+const tempTitle = ref("");
+const savingTitle = ref(false);
+const expandedReasoning = ref({});
+const messages = computed(() => store.messages);
+const presentation = useStreamingDisplay({
+  messages,
+  currentId: computed(() => store.currentId),
+  activeGeneration: computed(() => store.activeGeneration),
 });
-
-const modelOptions = computed(() => sessionStore.modelOptions);
-
-const aiRoles = computed(() => getAllRoles());
-const selectedRole = computed({
-  get: () => sessionStore.currentRole,
-  set: (value) => sessionStore.setRole(value),
+const navigation = useConversationNavigation({
+  messages,
+  currentId: computed(() => store.currentId),
+  scroller,
+  onNavigate: () => {
+    navigationPaused.value = true;
+    autoScroll.value = false;
+    showNewMessageIndicator.value = true;
+  },
 });
-const currentRoleId = computed(() => selectedRole.value);
-const currentRole = computed(() => sessionStore.getCurrentRole());
-const showDeveloperModeWarning = ref(false);
-let developerWarningTimer = null;
-
-const messages = computed(() => sessionStore.getcurmsgs());
-
+const isEmpty = computed(() => !messages.value.length);
+const selectedModel = computed({ get: () => store.model, set: store.setModel });
+const activeHere = computed(() => store.activeGeneration?.conversationId === store.currentId);
+const scrollToBottom = async () => {
+  if (!autoScroll.value) return;
+  await nextTick();
+  if (!autoScroll.value) return;
+  const element = scroller.value?.$el;
+  if (element) element.scrollTop = element.scrollHeight;
+};
+const onMeasuredLayout = () => {
+  navigation.onUpdate();
+  if (autoScroll.value) void scrollToBottom();
+};
+const onScrollerUpdate = (...indices) => {
+  navigation.onUpdate(...indices);
+  if (autoScroll.value) void scrollToBottom();
+};
+const resumeScrollTracking = () => {
+  navigation.cancelNavigation();
+  navigationPaused.value = false;
+};
+const onScrollKey = (event) => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key))
+    resumeScrollTracking();
+};
+const onScroll = () => {
+  if (navigationPaused.value) return;
+  const element = scroller.value?.$el;
+  if (!element) return;
+  autoScroll.value = element.scrollHeight - element.scrollTop - element.clientHeight < 40;
+  showNewMessageIndicator.value = !autoScroll.value;
+};
+const scrollToBottomOnClick = () => {
+  resumeScrollTracking();
+  autoScroll.value = true;
+  showNewMessageIndicator.value = false;
+  scrollToBottom();
+};
 watch(
-  () => sessionStore.curname,
-  async () => {
-    autoScroll = true;
+  () => store.currentId,
+  () => {
+    navigationPaused.value = false;
+    autoScroll.value = true;
     showNewMessageIndicator.value = false;
-    await forceScrollToBottom();
+    scrollToBottom();
   },
 );
-
-const md = new MarkdownIt({
-  highlight: (code, lang) => {
-    const validLang = !!(lang && hljs.getLanguage(lang));
-    const highlighted = validLang
-      ? hljs.highlight(code, { language: lang }).value
-      : hljs.highlightAuto(code).value;
-    return `<pre><code class="hljs ${validLang ? `language-${lang}` : ""}">${highlighted}</code></pre>`;
+watch(
+  () => [
+    messages.value.length,
+    messages.value.at(-1) && presentation.contentFor(messages.value.at(-1)),
+    messages.value.at(-1) && presentation.reasoningFor(messages.value.at(-1)),
+  ],
+  () => {
+    if (autoScroll.value) scrollToBottom();
+    else if (activeHere.value) showNewMessageIndicator.value = true;
   },
-  html: true,
-  linkify: true,
-  breaks: true,
-  typographer: true,
-  tables: true,
-});
-
-md.use(markdownItTable);
-
-const CHAT_CONTAINER_SELECTOR = ".content";
-const CHAT_EVENTS = ["wheel", "touchstart", "mousedown", "keydown"];
-
-const getChatContainer = () => document.querySelector(CHAT_CONTAINER_SELECTOR);
-
-const forceScrollToBottom = async () => {
-  await nextTick();
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  const container = getChatContainer();
-  if (container) {
-    container.scrollTop = container.scrollHeight;
-    setTimeout(() => {
-      container.scrollTo({
-        top: container.scrollHeight,
-        behavior: "smooth",
-      });
-    }, 100);
+  { flush: "post" },
+);
+const loadOlder = async () => {
+  resumeScrollTracking();
+  const element = scroller.value?.$el;
+  const previousHeight = element?.scrollHeight || 0;
+  autoScroll.value = false;
+  try {
+    await store.loadMessages(store.currentId, true);
+    await nextTick();
+    if (element) element.scrollTop += element.scrollHeight - previousHeight;
+  } catch (error) {
+    store.reportError(error);
   }
 };
-
-let autoScroll = true;
-
-const scrollToBottom = async () => {
-  if (!autoScroll) return;
-  await nextTick();
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const container = getChatContainer();
-  if (container) {
-    container.scrollTop = container.scrollHeight;
+const submit = () => {
+  resumeScrollTracking();
+  autoScroll.value = true;
+  store.send().catch(store.reportError);
+};
+const copy = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success("已复制");
+  } catch {
+    ElMessage.error("复制失败，请检查浏览器剪贴板权限");
   }
 };
-
-const scrollToBottomOnClick = async () => {
-  autoScroll = true;
-  showNewMessageIndicator.value = false;
-  await scrollToBottom();
-};
-
-const handleUserInteraction = () => {
-  autoScroll = false;
-  if (isTyping.value) {
-    showNewMessageIndicator.value = true;
+const copyCode = (event) => {
+  const button = event.target.closest(".copy-btn");
+  if (!button) return;
+  const row = button.closest("[data-message-id]");
+  const item = messages.value.find((message) => message.id === row?.dataset.messageId);
+  if (!item) {
+    ElMessage.error("无法获取这段代码，请重新打开回复后再试");
+    return;
   }
+  const index = [...row.querySelectorAll(".message-body .copy-btn")].indexOf(button);
+  const received = document.createElement("div");
+  received.innerHTML = renderMarkdown(item.content);
+  const code = received.querySelectorAll("pre code")[index];
+  if (code) copy(code.textContent);
+  else ElMessage.error("无法获取这段代码，请重新打开回复后再试");
 };
-
-const handleScroll = () => {
-  const container = getChatContainer();
-  if (!container) return;
-  const { scrollTop, scrollHeight, clientHeight } = container;
-  if (scrollTop + clientHeight < scrollHeight - 10) {
-    autoScroll = false;
-    if (isTyping.value) {
-      showNewMessageIndicator.value = true;
+const deleteMessage = async (item) => {
+  try {
+    await ElMessageBox.confirm("删除这条消息？此操作无法恢复。", "删除消息", {
+      confirmButtonText: "删除",
+      cancelButtonText: "取消",
+      type: "warning",
+    });
+  } catch {
+    return;
+  }
+  store.deleteMessage(item).catch(store.reportError);
+};
+const regenerate = async (item) => {
+  if (store.isGenerating) return;
+  const following = messages.value.filter((message) => message.seq > item.seq).length;
+  if (following) {
+    try {
+      await ElMessageBox.confirm(
+        `重新回复会替换此回复，并删除其后的 ${following} 条消息。是否继续？`,
+        "重新回复",
+        {
+          confirmButtonText: "重新回复",
+          cancelButtonText: "取消",
+          type: "warning",
+        },
+      );
+    } catch {
+      return;
     }
-  } else {
-    autoScroll = true;
-    showNewMessageIndicator.value = false;
   }
+  resumeScrollTracking();
+  autoScroll.value = true;
+  store.regenerate(item).catch(store.reportError);
 };
-
-const registerChatListeners = () => {
-  const container = getChatContainer();
-  if (!container) return;
-  CHAT_EVENTS.forEach((event) =>
-    container.addEventListener(event, handleUserInteraction, { passive: true }),
-  );
-  container.addEventListener("scroll", handleScroll, { passive: true });
+const messageCommand = (command, item) => {
+  if (command === "markdown") copy(item.content);
+  else if (command === "delete") deleteMessage(item);
 };
-
-const removeChatListeners = () => {
-  const container = getChatContainer();
-  if (!container) return;
-  CHAT_EVENTS.forEach((event) =>
-    container.removeEventListener(event, handleUserInteraction),
-  );
-  container.removeEventListener("scroll", handleScroll);
+const pending = (item) => item.status === "generating" && !presentation.contentFor(item);
+const statusLabel = (item) => {
+  if (item.status === "failed") return item.error_message || "生成失败，可重新回复";
+  if (item.status === "cancelled") return "已停止，保留部分回复";
+  if (item.status === "interrupted") return "生成中断，可重新回复";
+  if (item.finish_reason === "length") return "回复达到长度上限，内容可能不完整";
+  if (item.finish_reason === "content_filter") return "回复受到内容限制";
+  if (item.finish_reason && item.finish_reason !== "stop") return `结束原因：${item.finish_reason}`;
+  return "";
 };
-
-const flushBuffer = () => {
-  streamQueue.clear();
-};
-
-const onDelta = (delta) => {
-  if (!delta) return;
-  streamQueue.enqueueContent(delta);
-};
-
-const handleStreamFinished = () => {
-  isTyping.value = false;
-  showNewMessageIndicator.value = false;
-};
-
-onMounted(async () => {
-  addCopyButtons();
-  await forceScrollToBottom();
-  registerChatListeners();
-  
-  streamQueue.setCallbacks((delta) => {
-    sessionStore.adddelta(delta);
-    requestAnimationFrame(() => {
-      scrollToBottom();
-    });
-  });
-});
-
-onUpdated(() => {
-  addCopyButtons();
-});
-
-onBeforeUnmount(() => {
-  removeChatListeners();
-  streamQueue.destroy();
-  if (developerWarningTimer) {
-    window.clearTimeout(developerWarningTimer);
-  }
-});
-
-const triggerDeveloperModeWarning = (text) => {
-  if (
-    !isDeveloperMode(currentRoleId.value) ||
-    !text?.trim() ||
-    !isLikelyNonTechnical(text)
-  ) {
-    return;
-  }
-
-  showDeveloperModeWarning.value = true;
-  if (developerWarningTimer) {
-    window.clearTimeout(developerWarningTimer);
-  }
-  developerWarningTimer = window.setTimeout(() => {
-    showDeveloperModeWarning.value = false;
-  }, 3000);
-};
-
-const buildMessagesWithSystem = () => {
-  const systemPrompt = currentRole.value.systemPrompt;
-  const payloadMessages = sessionStore.getMessagesForModel();
-
-  if (payloadMessages.length) {
-    payloadMessages.pop();
-  }
-
-  return [{ role: "system", content: systemPrompt }, ...payloadMessages];
-};
-
-const submit = async ({ attachments = [] } = {}) => {
-  const trimmed = msg.value.trim();
-  if (!trimmed && !attachments.length) return;
-
-  triggerDeveloperModeWarning(trimmed);
-
-  sessionStore.sessionpush({
-    role: "user",
-    content: trimmed,
-    attachments,
-  });
-  msg.value = "";
-  await scrollToBottom();
-
-  const aiMessage = { role: "assistant", content: "", attachments: [] };
-  sessionStore.sessionpush(aiMessage);
-  isTyping.value = true;
-  autoScroll = true;
-
-  try {
-    await chatStream(
-      buildMessagesWithSystem(),
-      onDelta,
-      handleStreamFinished,
-      selectedModel.value,
-    );
-  } catch (error) {
-    isTyping.value = false;
-    aiMessage.content = "抱歉，回复生成出错";
-    showNewMessageIndicator.value = false;
-    flushBuffer();
-    console.error(error);
-  } finally {
-    autoScroll = true;
-  }
-};
-
-const renderMarkdown = (raw) => md.render(raw || "");
-
-const addCopyButtons = () => {
-  nextTick(() => {
-    const codeBlocks = document.querySelectorAll(
-      `${CHAT_CONTAINER_SELECTOR} pre`,
-    );
-    codeBlocks.forEach((block) => {
-      if (block.querySelector(".copy-btn")) return;
-      const button = document.createElement("button");
-      button.className = "copy-btn";
-      button.innerHTML = "复制";
-      button.addEventListener("click", () => {
-        const code = block.querySelector("code")?.textContent ?? "";
-        navigator.clipboard.writeText(code).then(() => {
-          button.textContent = "已复制！";
-          setTimeout(() => {
-            button.textContent = "复制";
-          }, 2000);
-        });
-      });
-      block.appendChild(button);
-    });
-  });
-};
-
-const copyMessage = (text) => {
-  navigator.clipboard.writeText((text ?? "").trim());
-};
-
-const copyMessageMarkdown = (text) => {
-  navigator.clipboard.writeText(text ?? "");
-};
-
-const handleDeleteMessage = (index) => {
-  sessionStore.removeMessageAt(index);
-};
-
-const handleRegenerateMessage = async (index) => {
-  const target = messages.value[index];
-  if (!target || target.role !== "assistant" || isTyping.value) {
-    return;
-  }
-
-  const userMessage = messages.value[index - 1];
-  const userMessageText = userMessage?.content || "";
-
-  sessionStore.trimMessagesFrom(index);
-
-  const aiMessage = { role: "assistant", content: "", attachments: [] };
-  sessionStore.sessionpush(aiMessage);
-  isTyping.value = true;
-  autoScroll = true;
-
-  try {
-    triggerDeveloperModeWarning(userMessageText);
-
-    await chatStream(
-      buildMessagesWithSystem(),
-      onDelta,
-      handleStreamFinished,
-      selectedModel.value,
-    );
-  } catch (error) {
-    isTyping.value = false;
-    aiMessage.content = "抱歉，重新生成时出错";
-    showNewMessageIndicator.value = false;
-    flushBuffer();
-    console.error(error);
-  } finally {
-    autoScroll = true;
-  }
-};
-
-const getAssistantAvatar = (roleId) =>
-  roleId === "developer" ? assistantAvatarDeveloper : assistantAvatarGeneral;
-
-const avatarForMessage = (item) => {
-  if (item.role === "user") {
-    return userAvatar;
-  }
-
-  return getAssistantAvatar(item.roleId || currentRoleId.value);
-};
-
-const assistantNameForMessage = (item) =>
-  getRoleById(item.roleId || currentRoleId.value).name;
-
-const isStreamingAssistantMessage = (item, index) =>
-  item.role === "assistant" &&
-  isTyping.value &&
-  index === messages.value.length - 1;
-
-const hasAssistantContent = (item) => !!item.content?.trim();
-
-const shouldShowPendingState = (item, index) =>
-  isStreamingAssistantMessage(item, index) &&
-  !hasAssistantContent(item);
-
-const pendingStateLabel = (item, index) => {
-  if (!isStreamingAssistantMessage(item, index)) {
-    return "";
-  }
-
-  return "正在生成回复";
-};
-
-const shouldShowPendingSkeleton = (item, index) =>
-  shouldShowPendingState(item, index) && !hasAssistantContent(item);
-
-const isEditingTitle = ref(false);
-const tempTitle = ref("");
-
 const startEditing = () => {
-  tempTitle.value = sessionStore.curname;
+  if (!store.currentConversation) return;
+  tempTitle.value = store.currentConversation.title;
+  editingId.value = store.currentId;
   isEditingTitle.value = true;
-  nextTick(() => {
-    document.querySelector(".title-input input")?.focus();
-  });
+  nextTick(() => document.querySelector(".title-input input")?.focus());
 };
-
-const saveTitle = () => {
-  if (tempTitle.value.trim()) {
-    sessionStore.updateTitle(tempTitle.value.trim());
+const focusTitle = async () => {
+  await nextTick();
+  titleButton.value?.focus({ preventScroll: true });
+};
+const cancelTitleEditing = () => {
+  isEditingTitle.value = false;
+  void focusTitle();
+};
+const saveTitle = async (event) => {
+  if (savingTitle.value || !isEditingTitle.value) return;
+  if (!tempTitle.value.trim()) {
+    ElMessage.warning("标题不能为空");
+    return;
   }
-  isEditingTitle.value = false;
+  savingTitle.value = true;
+  try {
+    await store.renameConversation(editingId.value, tempTitle.value.trim());
+    const restoreFocus = event?.type !== "blur" && document.activeElement?.closest(".title-input");
+    isEditingTitle.value = false;
+    if (restoreFocus) await focusTitle();
+  } catch (error) {
+    store.reportError(error);
+  } finally {
+    savingTitle.value = false;
+  }
 };
-
-const cancelEditing = () => {
-  isEditingTitle.value = false;
-};
-
-const selecthistory = (name) => {
-  flushBuffer();
-  sessionStore.selecthistory(name);
-};
-
-defineExpose({ selecthistory });
+defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.reportError) });
 </script>
 
 <template>
-  <div class="header">
-    <div class="header-title">
-      <template v-if="!isEditingTitle">
-        {{ sessionStore.curname }}
-        <el-icon @click="startEditing"><EditPen /></el-icon>
-      </template>
-      <template v-else>
-        <el-input
-          v-model="tempTitle"
-          class="title-input"
-          size="small"
-          @keyup.enter="saveTitle"
-          @blur="saveTitle"
-        />
-        <el-icon @click="cancelEditing"><Close /></el-icon>
-      </template>
-    </div>
-
-    <el-radio-group
-      v-model="selectedRole"
-      size="small"
-      class="role-selector"
-      :disabled="isTyping"
-    >
-      <el-radio-button
-        v-for="role in aiRoles"
-        :key="role.id"
-        :value="role.id"
+  <section class="chat-view" :class="{ 'has-messages': !isEmpty }">
+    <header class="header">
+      <button
+        class="title-action sidebar-toggle"
+        aria-label="切换会话列表"
+        :title="sidebarOpen ? '收起侧栏' : '展开侧栏'"
+        :aria-expanded="sidebarOpen"
+        @click="emit('toggle-sidebar')"
       >
-        {{ role.name }}
-      </el-radio-button>
-    </el-radio-group>
-    
-    <el-select
-      v-model="selectedModel"
-      size="small"
-      class="model-select"
-      :disabled="isTyping"
-      placeholder="选择模型"
-      :teleported="false"
-    >
-      <el-option
-        v-for="option in modelOptions"
-        :key="option.value"
-        :label="option.label"
-        :value="option.value"
-      />
-    </el-select>
-  </div>
-
-  <div class="role-indicator" :class="{ 'is-developer': currentRoleId === 'developer' }">
-    <span class="role-indicator__label">当前模式：{{ currentRole.name }}</span>
-    <span class="role-indicator__desc">{{ currentRole.description }}</span>
-  </div>
-
-  <transition name="warning-fade">
-    <el-alert
-      v-if="showDeveloperModeWarning"
-      title="当前是程序员助手模式"
-      type="warning"
-      description="这类问题更适合切换到通用助手后继续提问。"
-      show-icon
-      :closable="true"
-      @close="showDeveloperModeWarning = false"
-      class="developer-warning"
-    />
-  </transition>
-  
-  <DynamicScroller
-    class="content"
-    :items="messages"
-    :min-item-size="120"
-    key-field="_key"
-    :key="sessionStore.curname"
-  >
-    <template #default="{ item, index, active }">
-      <DynamicScrollerItem
-        :item="item"
-        :active="active"
-        :data-index="index"
-        :size-dependencies="[
-          item.content,
-          shouldShowPendingState(item, index),
-          pendingStateLabel(item, index),
-        ]"
-      >
-        <div
-          class="message-row"
-          :class="item.role === 'user' ? 'is-user' : 'is-assistant'"
-        >
-          <img
-            class="message-avatar"
-            :src="avatarForMessage(item)"
-            :alt="item.role === 'user' ? '用户头像' : 'AI头像'"
+        <el-icon :size="20"><Menu /></el-icon>
+      </button>
+      <div v-show="brandInHeader" id="echo-header-brand" class="header-brand-dock"></div>
+      <div class="header-title">
+        <template v-if="!isEditingTitle">
+          <button
+            ref="titleButton"
+            class="header-title-text title-rename"
+            aria-label="重命名对话"
+            title="重命名对话"
+            :disabled="!store.currentConversation"
+            @click="startEditing"
+          >
+            {{ store.currentConversation?.title || "EchoChat" }}
+          </button>
+        </template>
+        <template v-else>
+          <el-input
+            v-model="tempTitle"
+            class="title-input"
+            size="small"
+            aria-label="对话标题"
+            @keyup.enter="saveTitle"
+            @keydown.esc.prevent="cancelTitleEditing"
+            @blur="saveTitle"
           />
-          <div
-            class="message"
-            :class="[
-              item.role === 'user' ? 'user-message' : 'assistant-message',
-              { 'is-pending': shouldShowPendingState(item, index) },
+          <button
+            class="title-action"
+            aria-label="取消重命名"
+            @mousedown.prevent
+            @click="cancelTitleEditing"
+          >
+            <el-icon :size="16"><Close /></el-icon>
+          </button>
+        </template>
+      </div>
+      <el-select
+        v-model="selectedModel"
+        class="model-select"
+        popper-class="echo-mode-popper"
+        :show-arrow="false"
+        :disabled="store.isGenerating || !store.ready"
+        aria-label="回答方式"
+        placeholder="回答方式"
+      >
+        <el-option
+          v-for="option in store.options?.modes || []"
+          :key="option.value"
+          :label="option.label"
+          :value="option.value"
+          class="mode-option"
+        >
+          <div class="mode-option__copy">
+            <span class="mode-option__label">{{ option.label }}</span>
+            <small class="mode-option__description">{{
+              option.value === "thinking"
+                ? "适合复杂问题，先思考再回答"
+                : "适合日常问答，更快给出回复"
+            }}</small>
+          </div>
+          <el-icon
+            v-if="selectedModel === option.value"
+            class="mode-option__check"
+            aria-hidden="true"
+            ><Check
+          /></el-icon>
+        </el-option>
+      </el-select>
+    </header>
+    <el-alert
+      v-if="store.error"
+      :title="store.error"
+      type="error"
+      show-icon
+      class="connection-error"
+      @close="store.error = ''"
+    >
+      <el-button
+        v-if="!store.ready"
+        text
+        :loading="store.loading"
+        @click="store.initialize().catch(store.reportError)"
+        >重新连接</el-button
+      >
+    </el-alert>
+    <div v-if="store.isGenerating && !activeHere" class="generation-notice">
+      其他对话正在生成回复，点击“停止”可结束该回复。
+    </div>
+    <div v-if="store.pages[store.currentId]?.has_more" class="history-controls">
+      <el-button text :loading="store.pages[store.currentId]?.loading" @click="loadOlder"
+        >加载更早消息</el-button
+      >
+    </div>
+    <div class="chat-body" :class="{ 'is-empty': isEmpty }">
+      <ConversationNavigator
+        v-if="!isEmpty"
+        :key="store.currentId"
+        :entries="navigation.entries.value"
+        :active-id="navigation.activeId.value"
+        @select="navigation.navigate"
+      />
+      <div v-if="isEmpty" class="chat-empty">
+        <div class="empty-brand" aria-hidden="true">
+          <img :src="assistantAvatarGeneral" alt="" />
+        </div>
+        <h1>今天，想一起解决什么？</h1>
+        <p>写下问题、分享内容，或一起把想法理清楚。</p>
+      </div>
+      <DynamicScroller
+        v-if="!isEmpty"
+        ref="scroller"
+        class="content"
+        :items="messages"
+        :min-item-size="90"
+        :emit-update="true"
+        key-field="id"
+        :key="store.currentId"
+        @scroll.passive="onScroll"
+        @wheel.passive="resumeScrollTracking"
+        @touchmove.passive="resumeScrollTracking"
+        @pointerdown="resumeScrollTracking"
+        @keydown="onScrollKey"
+        @resize="onMeasuredLayout"
+        @update="onScrollerUpdate"
+        @click="copyCode"
+      >
+        <template #default="{ item, index, active }">
+          <DynamicScrollerItem
+            :item="item"
+            :active="active"
+            :emit-resize="true"
+            @resize="onMeasuredLayout"
+            :data-index="index"
+            :size-dependencies="[
+              presentation.contentFor(item),
+              presentation.reasoningFor(item),
+              expandedReasoning[item.id],
+              item.status,
+              item.error_message,
             ]"
           >
-            <div class="message-header">
-              <span class="message-role">
-                {{ item.role === 'user' ? '我' : assistantNameForMessage(item) }}
-              </span>
-              <div class="message-actions">
-                <el-tooltip content="复制纯文本" placement="top">
-                  <button @click="copyMessage(item.content)" class="action-btn">
-                    <el-icon><CopyDocument /></el-icon>
-                  </button>
-                </el-tooltip>
-                <el-tooltip
-                  v-if="item.role === 'assistant'"
-                  content="复制全文"
-                  placement="top"
+            <div
+              class="message-row"
+              :class="item.role === 'user' ? 'is-user' : 'is-assistant'"
+              :data-message-id="item.id"
+            >
+              <img
+                v-if="item.role === 'assistant'"
+                class="message-avatar"
+                :src="assistantAvatarGeneral"
+                alt="AI头像"
+              />
+              <div
+                class="message"
+                :class="item.role === 'user' ? 'user-message' : 'assistant-message'"
+                :data-revealing="presentation.isRevealing(item) || undefined"
+              >
+                <div
+                  v-if="item.role === 'assistant' && item.reasoning_content"
+                  class="reasoning-panel"
                 >
                   <button
-                    @click="copyMessageMarkdown(item.content)"
-                    class="action-btn"
+                    class="reasoning-toggle"
+                    type="button"
+                    :aria-expanded="!!expandedReasoning[item.id]"
+                    :aria-controls="`reasoning-${item.id}`"
+                    @click="expandedReasoning[item.id] = !expandedReasoning[item.id]"
                   >
-                    <el-icon><DocumentCopy /></el-icon>
+                    <el-icon :class="{ 'is-expanded': expandedReasoning[item.id] }"
+                      ><ArrowRight /></el-icon
+                    ><span>思考过程</span>
                   </button>
-                </el-tooltip>
-                <el-tooltip
-                  v-if="item.role === 'assistant'"
-                  content="重新回复"
-                  placement="top"
+                  <div
+                    v-if="expandedReasoning[item.id]"
+                    :id="`reasoning-${item.id}`"
+                    class="reasoning-content"
+                  >
+                    {{ presentation.reasoningFor(item) }}
+                  </div>
+                </div>
+                <div v-if="pending(item)" class="pending-state">
+                  <span>{{ item.reasoning_content ? "等待回答" : "等待回复" }}</span
+                  ><span class="pending-state__dots" aria-hidden="true"
+                    ><span></span><span></span><span></span
+                  ></span>
+                </div>
+                <div class="message-body" v-html="presentation.htmlFor(item)"></div>
+                <p
+                  v-if="item.status === 'generating' && item.content"
+                  class="streaming-state"
+                  role="status"
                 >
-                  <button @click="handleRegenerateMessage(index)" class="action-btn">
-                    <el-icon><RefreshRight /></el-icon>
-                  </button>
-                </el-tooltip>
-                <el-tooltip content="删除此消息" placement="top">
-                  <button @click="handleDeleteMessage(index)" class="action-btn">
-                    <el-icon><Delete /></el-icon>
-                  </button>
-                </el-tooltip>
+                  <span class="generation-dot" aria-hidden="true"></span>正在生成
+                </p>
+                <p
+                  v-if="item.role === 'assistant' && statusLabel(item)"
+                  class="message-status"
+                  :class="{ 'is-error': item.status === 'failed' }"
+                  role="status"
+                >
+                  {{ statusLabel(item) }}
+                </p>
+                <AttachmentPreview
+                  v-if="item.attachments?.length"
+                  :attachments="item.attachments"
+                />
+                <div class="message-actions">
+                  <el-tooltip content="复制纯文本" placement="top"
+                    ><button
+                      class="action-btn"
+                      aria-label="复制纯文本"
+                      @click="copy(markdownPlainText(item.content))"
+                    >
+                      <el-icon><CopyDocument /></el-icon></button
+                  ></el-tooltip>
+                  <el-tooltip v-if="item.role === 'assistant'" content="重新回复" placement="top"
+                    ><button
+                      class="action-btn"
+                      aria-label="重新回复"
+                      :disabled="
+                        store.isGenerating || !item.related_user_message_id || !item.context_segment
+                      "
+                      @click="regenerate(item)"
+                    >
+                      <el-icon><RefreshRight /></el-icon></button
+                  ></el-tooltip>
+                  <el-dropdown
+                    trigger="click"
+                    @command="(command) => messageCommand(command, item)"
+                  >
+                    <button class="action-btn" aria-label="更多消息操作" title="更多消息操作">
+                      <el-icon><MoreFilled /></el-icon>
+                    </button>
+                    <template #dropdown
+                      ><el-dropdown-menu>
+                        <el-dropdown-item
+                          v-if="item.role === 'assistant'"
+                          command="markdown"
+                          :icon="DocumentCopy"
+                          >复制 Markdown</el-dropdown-item
+                        >
+                        <el-dropdown-item command="delete" :icon="Delete"
+                          >删除此消息</el-dropdown-item
+                        >
+                      </el-dropdown-menu></template
+                    >
+                  </el-dropdown>
+                </div>
               </div>
             </div>
-
-            <div
-              v-if="shouldShowPendingState(item, index)"
-              class="pending-state"
-            >
-              <span class="pending-state__label">
-                {{ pendingStateLabel(item, index) }}
-              </span>
-              <span class="pending-state__dots" aria-hidden="true">
-                <span></span>
-                <span></span>
-                <span></span>
-              </span>
-            </div>
-
-            <div
-              v-if="shouldShowPendingSkeleton(item, index)"
-              class="pending-skeleton"
-              aria-hidden="true"
-            >
-              <span class="pending-skeleton__line first"></span>
-              <span class="pending-skeleton__line second"></span>
-            </div>
-
-            <div class="message-body" v-html="renderMarkdown(item.content)"></div>
-
-            <AttachmentPreview
-              v-if="item.attachments?.length"
-              :attachments="item.attachments"
-            />
-          </div>
-        </div>
-      </DynamicScrollerItem>
-    </template>
-  </DynamicScroller>
-
-  <ChatInput v-model:msg="msg" v-model:isTyping="isTyping" @submit="submit" />
-
-  <div
-    v-if="showNewMessageIndicator"
-    class="new-message-indicator"
-    @click="scrollToBottomOnClick"
-  >
-    新消息
-  </div>
+          </DynamicScrollerItem>
+        </template>
+      </DynamicScroller>
+      <div v-show="isEmpty" id="echo-chat-suggestions" class="chat-suggestions"></div>
+    </div>
+    <div v-show="showNewMessageIndicator" class="latest-marker">
+      <button class="new-message-indicator" @click="scrollToBottomOnClick">回到最新</button>
+    </div>
+    <ChatInput @submit="submit" />
+  </section>
 </template>
 
 <style scoped>
-.header {
-  padding: 20px 24px;
-  background: var(--color-panel);
-  border-bottom: 1px solid var(--color-border);
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-heading);
-  display: flex;
-  align-items: center;
-  gap: 16px;
+.chat-view {
   position: relative;
-}
-
-.header::after {
-  content: '';
-  position: absolute;
-  left: 24px;
-  right: 24px;
-  bottom: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--color-border), transparent);
-  opacity: 0.5;
-}
-
-.header-title {
+  display: flex;
   flex: 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
   min-width: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-heading);
-  letter-spacing: 0.2px;
-}
-
-.header-title .el-icon {
-  padding: 6px;
-  border-radius: 8px;
-  background: var(--color-input-background);
-  color: var(--color-muted);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.header-title .el-icon:hover {
-  background: var(--color-toolbar-hover-bg);
-  color: var(--color-text-primary);
-  transform: scale(1.05);
-}
-
-.title-input {
-  width: 220px;
-  max-width: 60%;
-}
-
-.title-input :deep(.el-input__wrapper) {
-  border-radius: 10px;
-  background: var(--color-input-background);
-  border: 1px solid var(--color-border);
-  box-shadow: var(--shadow-soft);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  padding: 6px 12px;
-}
-
-.title-input :deep(.el-input__wrapper:hover) {
-  border-color: var(--color-accent);
-  box-shadow: var(--shadow-medium);
-}
-
-.title-input :deep(.el-input__wrapper.is-focus) {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1), var(--shadow-medium);
-}
-
-.title-input :deep(.el-input__inner) {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.role-selector {
-  border-radius: 12px;
+  min-height: 0;
+  flex-direction: column;
   overflow: hidden;
-  box-shadow: var(--shadow-soft);
 }
-
-.role-selector :deep(.el-radio-button__inner) {
-  border: none;
-  background: var(--color-input-background);
-  color: var(--color-text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  padding: 8px 16px;
-  transition: all 0.2s ease;
-}
-
-.role-selector :deep(.el-radio-button__inner:hover) {
-  color: var(--color-text-primary);
-  background: var(--color-toolbar-hover-bg);
-}
-
-.role-selector :deep(.el-radio-button__orig-radio:checked + .el-radio-button__inner),
-.role-selector :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
-  background: var(--color-accent);
-  color: var(--color-accent-contrast);
-  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.2);
-}
-
-.model-select {
-  width: 160px;
-}
-
-.model-select :deep(.el-select__wrapper) {
-  border-radius: 12px;
-  background: var(--color-input-background);
-  border: 1px solid var(--color-border);
-  box-shadow: var(--shadow-soft);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.model-select :deep(.el-select__wrapper:hover) {
-  border-color: var(--color-accent);
-  box-shadow: var(--shadow-medium);
-}
-
-.model-select :deep(.el-select__wrapper.is-focused) {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1), var(--shadow-medium);
-}
-
-.model-select :deep(.el-select__placeholder) {
-  color: var(--color-muted);
-}
-
-.model-select :deep(.el-input__inner) {
-  color: var(--color-text-primary);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.role-indicator {
+.header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 24px;
+  gap: var(--space-3);
+  flex-shrink: 0;
+  height: var(--chat-header-height);
+  padding: 0 var(--chat-gutter);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-panel);
-  color: var(--color-text-secondary);
-  font-size: 13px;
 }
-
-.role-indicator::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #10b981;
-  flex: 0 0 auto;
-}
-
-.role-indicator.is-developer::before {
-  background: #2563eb;
-}
-
-.role-indicator__label {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.role-indicator__desc {
-  color: var(--color-muted);
-}
-
-.developer-warning {
-  margin: 12px 24px 0;
-}
-
-.warning-fade-enter-active,
-.warning-fade-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-
-.warning-fade-enter-from,
-.warning-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
-}
-
-.content {
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
   flex: 1;
-  overflow-y: auto;
-  background: var(--color-panel-alt);
-  padding: 32px 12%;
+  color: var(--color-heading);
 }
-
-.message-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 48px;
+.header-brand-dock {
+  width: 22px;
+  flex-shrink: 0;
 }
-
-.message-row.is-user {
-  flex-direction: row-reverse;
+.header-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 550;
 }
-
-.message-avatar {
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
-  background: var(--color-surface);
-  padding: 8px;
-  box-shadow: var(--shadow-medium);
-  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.message-row:hover .message-avatar {
-  transform: scale(1.05);
-  box-shadow: var(--shadow-strong);
-}
-
-.message {
-  max-width: 70%;
-  width: fit-content;
-  padding: 18px 22px;
-  margin-bottom: 24px;
-  border-radius: 20px;
-  position: relative;
-  box-shadow: var(--shadow-soft);
-  animation: messageSlideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  word-break: break-word;
-  color: var(--color-text-primary);
-  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.message:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-medium);
-}
-
-.message.user-message {
-  background: linear-gradient(135deg, var(--color-bubble-user) 0%, var(--color-accent-strong) 100%);
-  color: var(--color-accent-contrast);
-  border: none;
-  box-shadow: var(--shadow-medium);
-}
-
-.message.user-message:hover {
-  box-shadow: var(--shadow-strong);
-}
-
-.message.assistant-message {
-  background: var(--color-elevated-surface);
-  color: var(--color-text-primary);
-}
-
-.message.assistant-message.is-pending {
-  border-color: rgba(37, 99, 235, 0.18);
-  box-shadow:
-    0 0 0 1px rgba(37, 99, 235, 0.05),
-    var(--shadow-medium);
-}
-
-.message-row.is-user .message-actions .action-btn {
-  color: rgba(249, 250, 251, 0.8);
-}
-
-.message-row.is-user .message-actions .action-btn:hover {
-  color: var(--color-accent-contrast);
-}
-
-.message-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.message-role {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
+.title-rename {
+  appearance: none;
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  margin-left: calc(var(--space-2) * -1);
+  border: 0;
+  border-radius: var(--radius-control);
   color: inherit;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast);
 }
-
-.message-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.title-rename:hover,
+.title-rename:focus-visible {
+  background: var(--color-panel-alt);
 }
-
-.action-btn {
-  width: 28px;
-  height: 28px;
+.title-rename:disabled {
+  cursor: default;
+}
+.title-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: none;
-  border-radius: 6px;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
   background: transparent;
-  color: var(--color-muted);
+  color: var(--color-text-secondary);
   cursor: pointer;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  transition:
+    color var(--motion-fast),
+    background var(--motion-fast);
 }
-
-.action-btn:hover {
-  background: var(--color-toolbar-hover-bg);
+.title-action:hover,
+.title-action:focus-visible {
+  background: var(--color-panel-alt);
   color: var(--color-text-primary);
 }
-
-.message-row.is-user .action-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+.title-input {
+  max-width: 360px;
 }
-
-.pending-state {
-  display: inline-flex;
+.model-select {
+  width: 136px;
+  flex-shrink: 0;
+}
+.model-select :deep(.el-select__wrapper) {
+  min-height: 36px;
+  border-radius: var(--radius-control);
+  background: var(--color-input-background);
+  box-shadow: 0 0 0 1px var(--color-border-strong) inset;
+}
+.model-select :deep(.el-select__wrapper.is-focused) {
+  box-shadow:
+    0 0 0 1px var(--color-accent) inset,
+    0 0 0 3px color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+.model-select :deep(.el-select__selected-item) {
+  color: var(--color-text-primary);
+  font-size: 13px;
+}
+.model-select :deep(.el-select__caret) {
+  color: var(--color-accent);
+}
+.model-select :deep(.el-select__wrapper.is-disabled) {
+  opacity: 0.5;
+}
+.connection-error {
+  flex-shrink: 0;
+  margin: var(--space-2) var(--chat-gutter) 0;
+  width: auto;
+}
+.generation-notice {
+  padding: var(--space-2) var(--chat-gutter);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+.history-controls {
+  text-align: center;
+}
+.chat-body {
+  display: flex;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+}
+.chat-body.is-empty {
+  justify-content: safe center;
+  gap: var(--space-6);
+  overflow-y: auto;
+  padding-block: var(--space-12);
+}
+.chat-empty {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(37, 99, 235, 0.03));
-  border: 1px solid rgba(37, 99, 235, 0.12);
+  gap: var(--space-3);
+  width: calc(100% - var(--chat-gutter) * 2);
+  max-width: var(--chat-column-width);
+  margin: 0 auto;
+  text-align: center;
+}
+.empty-brand {
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 72px;
+  height: 72px;
+  margin-bottom: var(--space-3);
+}
+.empty-brand::before {
+  content: "";
+  position: absolute;
+  inset: 10px -5px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 22%, transparent);
+  border-radius: 50%;
+  transform: rotate(-23deg);
+}
+.empty-brand::after {
+  content: "";
+  position: absolute;
+  inset: 9px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-brand-mint) 12%, transparent);
+  filter: blur(14px);
+}
+.empty-brand img {
+  width: 64px;
+  height: 64px;
+  position: relative;
+  z-index: 1;
+}
+.chat-empty h1 {
+  font-size: clamp(32px, 2.5vw, 36px);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-heading);
+}
+.chat-empty p {
+  color: var(--color-text-secondary);
+  font-size: 15px;
+  line-height: 1.75;
+}
+.chat-suggestions {
+  width: calc(100% - var(--chat-gutter) * 2);
+  max-width: var(--chat-column-width);
+  margin: 0 auto;
+}
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-8) 0 var(--space-2);
+}
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: calc(100% - var(--chat-gutter) * 2);
+  max-width: var(--chat-column-width);
+  margin: 0 auto;
+  padding-bottom: var(--space-8);
+}
+.message-row.is-user {
+  justify-content: flex-end;
+  padding-bottom: var(--space-6);
+}
+.message-avatar {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  padding: 2px;
+  border-radius: var(--radius-control);
+  background: var(--color-panel-alt);
+}
+.message {
+  min-width: 0;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+.assistant-message {
+  flex: 1;
+}
+.user-message {
+  max-width: 70%;
+}
+.user-message .message-body {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-message);
+  background: var(--color-toolbar-bg);
+}
+.user-message .message-actions {
+  justify-content: flex-end;
+}
+.message-body {
+  font-size: 16px;
+  line-height: 1.75;
+}
+.message-body :deep(p) {
+  margin: 0 0 var(--space-3);
+}
+.message-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.message-body :deep(h1),
+.message-body :deep(h2),
+.message-body :deep(h3) {
+  margin: var(--space-6) 0 var(--space-3);
+  line-height: 1.4;
+  font-weight: 600;
+}
+.message-body :deep(h1) {
+  font-size: 24px;
+}
+.message-body :deep(h2) {
+  font-size: 21px;
+}
+.message-body :deep(h3) {
+  font-size: 18px;
+}
+.message-body :deep(h1:first-child),
+.message-body :deep(h2:first-child),
+.message-body :deep(h3:first-child) {
+  margin-top: 0;
+}
+.message-body :deep(ul),
+.message-body :deep(ol) {
+  padding-left: 1.5em;
+  margin: var(--space-3) 0;
+}
+.message-body :deep(li) {
+  margin-bottom: var(--space-1);
+}
+.message-body :deep(strong) {
+  font-weight: 600;
+}
+.message-body :deep(a) {
+  color: var(--color-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.message-body :deep(a:hover) {
+  color: var(--color-accent-strong);
+}
+.message-body :deep(blockquote) {
+  margin: var(--space-4) 0;
+  padding: var(--space-2) var(--space-4);
+  border-left: 2px solid var(--color-border-strong);
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+  background: var(--color-panel-alt);
   color: var(--color-text-secondary);
 }
-
-.pending-state__label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-primary);
+.message-body :deep(blockquote p:last-child) {
+  margin-bottom: 0;
 }
-
-.pending-state__dots {
+.message-body :deep(code:not(.hljs)) {
+  padding: 0.15em 0.35em;
+  border-radius: var(--space-1);
+  background: var(--color-panel-alt);
+  font-size: 0.9em;
+}
+.content :deep(pre) {
+  position: relative;
+  max-width: 100%;
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-code-border);
+  border-radius: var(--radius-list);
+  overflow-x: auto;
+  background: var(--color-code-surface);
+  color: var(--color-code-text);
+}
+.content :deep(code.hljs) {
+  display: block;
+  padding: 0;
+  background: transparent;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--color-code-text);
+}
+.content :deep(.code-language) {
+  display: block;
+  padding-right: 60px;
+  margin-bottom: var(--space-3);
+  color: var(--color-code-label);
+  font-size: 12px;
+  line-height: 20px;
+}
+.content :deep(.copy-btn) {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  min-height: 28px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-code-border);
+  border-radius: var(--radius-control);
+  background: var(--color-code-surface);
+  color: var(--color-code-label);
+  font-size: 12px;
+  cursor: pointer;
+}
+.content :deep(.copy-btn:hover) {
+  color: var(--color-code-text);
+  border-color: var(--color-code-label);
+}
+.content :deep(.hljs-keyword),
+.content :deep(.hljs-selector-tag),
+.content :deep(.hljs-built_in),
+.content :deep(.hljs-title) {
+  color: var(--color-code-keyword);
+}
+.content :deep(.hljs-string),
+.content :deep(.hljs-regexp),
+.content :deep(.hljs-attribute) {
+  color: var(--color-code-string);
+}
+.content :deep(.hljs-number),
+.content :deep(.hljs-literal),
+.content :deep(.hljs-symbol),
+.content :deep(.hljs-type) {
+  color: var(--color-code-number);
+}
+.content :deep(.hljs-comment),
+.content :deep(.hljs-quote) {
+  color: var(--color-code-comment);
+}
+.content :deep(table) {
+  display: block;
+  max-width: 100%;
+  margin: var(--space-4) 0;
+  border-collapse: collapse;
+  overflow-x: auto;
+  font-size: 14px;
+}
+.content :deep(th),
+.content :deep(td) {
+  overflow-wrap: normal;
+  word-break: normal;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-table-border);
+  text-align: left;
+}
+.content :deep(th) {
+  background: var(--color-table-header-bg);
+  font-weight: 600;
+}
+.reasoning-panel {
+  margin-bottom: var(--space-3);
+}
+.reasoning-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-2);
+  margin-left: calc(var(--space-2) * -1);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
 }
-
-.pending-state__dots span {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
+.reasoning-toggle:hover {
+  background: var(--color-panel-alt);
+  color: var(--color-text-primary);
+}
+.reasoning-toggle .el-icon {
+  transition: transform var(--motion-fast);
+}
+.reasoning-toggle .is-expanded {
+  transform: rotate(90deg);
+}
+.reasoning-content {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-left: 2px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.message-status,
+.streaming-state {
+  margin: var(--space-3) 0 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+}
+.message-status.is-error {
+  color: var(--color-danger);
+}
+.streaming-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.generation-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
   background: var(--color-accent);
-  opacity: 0.3;
   animation: thinkingDots 1.2s ease-in-out infinite;
 }
-
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  min-height: 32px;
+  opacity: 0;
+  transition: opacity var(--motion-fast);
+}
+.message-row:hover .message-actions,
+.message-row:focus-within .message-actions {
+  opacity: 1;
+}
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 17px;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast),
+    background var(--motion-fast);
+}
+.action-btn:hover,
+.action-btn:focus-visible {
+  background: var(--color-panel-alt);
+  color: var(--color-text-primary);
+}
+.action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.pending-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+.pending-state__dots {
+  display: flex;
+  gap: var(--space-1);
+}
+.pending-state__dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: thinkingDots 1.2s ease-in-out infinite;
+}
 .pending-state__dots span:nth-child(2) {
   animation-delay: 0.2s;
 }
-
 .pending-state__dots span:nth-child(3) {
   animation-delay: 0.4s;
 }
-
-.pending-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.pending-skeleton__line {
-  display: block;
-  height: 10px;
-  border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    rgba(148, 163, 184, 0.14) 0%,
-    rgba(148, 163, 184, 0.32) 50%,
-    rgba(148, 163, 184, 0.14) 100%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.4s linear infinite;
-}
-
-.pending-skeleton__line.first {
-  width: min(280px, 100%);
-}
-
-.pending-skeleton__line.second {
-  width: min(180px, 72%);
-}
-
-.message-body :deep(p) {
-  margin: 0.5em 0;
-}
-
-.message-body :deep(a) {
-  color: var(--color-link);
-}
-
-.message-body :deep(a:hover) {
-  text-decoration: underline;
-  color: var(--color-link-hover);
-}
-
-.message-body :deep(code:not(.hljs)) {
-  background: var(--color-code-surface);
-  padding: 0.2em 0.4em;
-  border-radius: 4px;
-}
-
-.content :deep(pre) {
+.latest-marker {
   position: relative;
-  background: var(--color-code-surface);
-  border: 1px solid var(--color-code-border);
-  border-radius: 10px;
-  padding: 16px;
-  margin: 16px 0;
-  overflow-x: auto;
+  height: 0;
+  flex-shrink: 0;
+  z-index: 1;
 }
-
-.content :deep(code.hljs) {
-  background: transparent;
-  padding: 0;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 14px;
-  color: var(--color-text-primary);
-}
-
-.content :deep(pre)::before {
-  content: "代码";
-  display: block;
-  font-size: 12px;
-  color: var(--color-code-label);
-  margin-bottom: 8px;
-}
-
-.content :deep(.copy-btn) {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: var(--color-copy-button-bg);
-  color: var(--color-accent-contrast);
-  border: none;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.content :deep(.copy-btn:hover) {
-  background: var(--color-copy-button-hover);
-}
-
 .new-message-indicator {
-  position: fixed;
-  bottom: 80px;
-  right: 24px;
-  background: var(--color-new-indicator-bg);
-  color: var(--color-accent-contrast);
-  padding: 8px 18px;
-  border-radius: 999px;
-  font-size: 12px;
+  position: absolute;
+  right: var(--chat-gutter);
+  bottom: var(--space-2);
+  min-height: 34px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-control);
+  background: var(--color-input-background);
+  color: var(--color-text-primary);
+  padding: var(--space-1) var(--space-3);
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
-  box-shadow: var(--shadow-strong);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: var(--shadow-soft);
 }
-
-.new-message-indicator:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-strong);
+.title-action:focus-visible,
+.title-rename:focus-visible,
+.action-btn:focus-visible,
+.reasoning-toggle:focus-visible,
+.new-message-indicator:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
-
-@keyframes messageSlideIn {
-  from {
-    opacity: 0;
-    transform: translateY(20px) scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
 @keyframes thinkingDots {
   0%,
   80%,
   100% {
-    opacity: 0.25;
-    transform: translateY(0);
+    opacity: 0.3;
   }
   40% {
     opacity: 1;
-    transform: translateY(-2px);
   }
 }
-
-@keyframes shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-  100% {
-    background-position: -200% 0;
+@media (hover: none) {
+  .message-actions {
+    opacity: 1;
   }
 }
-
-.vue-recycle-scroller__item-view {
-  margin: 0 !important;
-}
-
-.content :deep(table) {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 16px 0;
-  background: var(--color-table-bg);
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid var(--color-table-border);
-  font-size: 14px;
-}
-
-.content :deep(th),
-.content :deep(td) {
-  padding: 12px 16px;
-  text-align: left;
-  border-bottom: 1px solid var(--color-table-border);
-}
-
-.content :deep(th) {
-  background: var(--color-table-header-bg);
-  font-weight: 600;
-  color: var(--color-heading);
-}
-
-.content :deep(tr:last-child td) {
-  border-bottom: none;
-}
-
-::-webkit-scrollbar {
-  width: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--color-scroll-track);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--color-scroll-thumb);
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-scroll-thumb-hover);
-}
-
-@media (max-width: 960px) {
+@media (max-width: 767px) {
+  .title-action,
+  .title-rename,
+  .action-btn,
+  .reasoning-toggle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .title-action,
+  .action-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .model-select :deep(.el-select__wrapper) {
+    min-height: 44px;
+  }
+  .content :deep(.copy-btn) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .content :deep(.code-language) {
+    min-height: 36px;
+    line-height: 36px;
+    margin-bottom: var(--space-2);
+  }
+  .header {
+    gap: var(--space-2);
+  }
+  .model-select {
+    width: 118px;
+  }
+  .header-title-text {
+    font-size: 15px;
+  }
+  .chat-body.is-empty {
+    gap: var(--space-4);
+    padding-block: var(--space-8);
+  }
+  .chat-empty {
+    margin-top: 0;
+  }
+  .chat-empty h1 {
+    max-width: 260px;
+    font-size: 28px;
+  }
+  .chat-empty p {
+    max-width: 285px;
+    font-size: 14px;
+  }
+  .empty-brand {
+    margin-bottom: var(--space-2);
+  }
   .content {
-    padding: 24px 24px;
+    padding-top: var(--space-6);
   }
-
-  .message {
+  .message-row {
+    gap: var(--space-2);
+    padding-bottom: var(--space-6);
+  }
+  .message-avatar {
+    width: 24px;
+    height: 24px;
+  }
+  .user-message {
     max-width: 85%;
   }
-}
-
-@media (max-width: 640px) {
-  .header {
-    flex-wrap: wrap;
+  .user-message .message-body {
+    padding: var(--space-2) var(--space-3);
   }
-
-  .role-indicator {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .content {
-    padding: 20px 16px;
-  }
-
-  .message-row {
-    gap: 12px;
-  }
-
-  .message {
-    max-width: 100%;
-  }
-
-  .pending-state {
-    width: 100%;
-    justify-content: space-between;
-  }
-}
-
-@media (max-width: 480px) {
-  .header {
-    padding: 14px 18px;
-    font-size: 16px;
-  }
-
-  .title-input {
-    width: 180px;
-  }
-
-  .content {
-    padding: 18px 12px;
-  }
-
-  .developer-warning {
-    margin: 10px 12px 0;
-  }
-
-  .message-avatar {
-    width: 36px;
-    height: 36px;
-    padding: 4px;
-  }
-
-  .message {
-    padding: 14px 16px;
-  }
-
   .message-actions {
-    gap: 4px;
+    opacity: 1;
   }
+}
+@media (max-height: 650px) {
+  .chat-body.is-empty {
+    padding-block: var(--space-6);
+  }
+  .chat-empty {
+    margin-top: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pending-state__dots span,
+  .generation-dot {
+    animation: none;
+  }
+}
+</style>
+
+<style>
+.echo-mode-popper.el-popper.is-light {
+  width: 280px;
+  max-width: calc(100vw - 32px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-list);
+  background: var(--color-elevated-surface);
+  box-shadow: var(--shadow-medium);
+  overflow: hidden;
+}
+.echo-mode-popper .el-select-dropdown__list {
+  padding: var(--space-2);
+}
+.echo-mode-popper .el-select-dropdown__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: auto;
+  min-height: 68px;
+  padding: var(--space-3);
+  border-radius: var(--radius-control);
+  color: var(--color-text-primary);
+  line-height: 1.5;
+  white-space: normal;
+  transition:
+    background var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+.echo-mode-popper .el-select-dropdown__item + .el-select-dropdown__item {
+  margin-top: var(--space-1);
+}
+.echo-mode-popper .mode-option__copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.echo-mode-popper .mode-option__label {
+  font-size: 14px;
+  font-weight: 550;
+}
+.echo-mode-popper .mode-option__description {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+.echo-mode-popper .mode-option__check {
+  flex-shrink: 0;
+  color: var(--color-toolbar-text);
+  font-size: 17px;
+}
+.echo-mode-popper .el-select-dropdown__item.is-selected {
+  color: var(--color-text-primary);
+  background: var(--color-toolbar-bg);
+}
+.echo-mode-popper .el-select-dropdown__item.is-hovering {
+  background: var(--color-panel-alt);
+  box-shadow: 0 0 0 1px var(--color-border-strong) inset;
+}
+.echo-mode-popper .el-select-dropdown__item.is-selected.is-hovering {
+  background: var(--color-toolbar-hover-bg);
 }
 </style>

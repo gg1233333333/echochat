@@ -1,6 +1,5 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
-import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
 import VueVirtualScroller from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
@@ -9,8 +8,6 @@ import { useThemeStore } from "@/stores/theme";
 
 const app = createApp(App);
 const pinia = createPinia();
-// 持久化 Pinia 状态
-pinia.use(piniaPluginPersistedstate);
 
 // 注册全局插件：长列表采用虚拟滚动以提升性能
 app.use(VueVirtualScroller);

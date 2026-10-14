@@ -1,140 +1,119 @@
-/* 基础调色板 - 简约实用 */
 :root {
-  --vt-c-white: #ffffff;
-  --vt-c-black: #050b16;
-
-  /* 主背景色 */
-  --color-app-background: #f5f7fb;
-  --color-panel: #ffffff;
-  --color-panel-alt: #f9fafb;
+  color-scheme: light;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --radius-control: 10px;
+  --radius-list: 12px;
+  --radius-message: 16px;
+  --radius-composer: 20px;
+  --radius-canvas: 24px;
+  --motion-fast: 160ms;
+  --motion-normal: 240ms;
+  --color-shell: #081221;
+  --color-sidebar-surface: #0d192d;
+  --color-sidebar-text: #edf3fd;
+  --color-sidebar-muted: #aabad0;
+  --color-sidebar-hover: #15243c;
+  --color-sidebar-border: rgb(255 255 255 / 10%);
+  --color-brand-mint: #88e5c2;
+  --color-app-background: var(--color-shell);
+  --color-panel: #f7f9fc;
+  --color-panel-alt: #eef2f8;
   --color-surface: #ffffff;
   --color-elevated-surface: #ffffff;
-
-  /* 边框系统 */
-  --color-border: #e5e7eb;
-  --color-border-strong: #d1d5db;
-
-  /* 文本系统 */
-  --color-heading: #111827;
-  --color-text-primary: #1f2937;
-  --color-text-secondary: #4b5563;
-  --color-muted: #9ca3af;
-
-  /* 主色调 - 克制的蓝色 */
-  --color-accent: #2563eb;
-  --color-accent-strong: #1d4ed8;
+  --color-border: #e2e8f2;
+  --color-border-strong: #c2ccdb;
+  --color-heading: #182235;
+  --color-text-primary: #182235;
+  --color-text-secondary: #59677d;
+  --color-muted: #66748a;
+  --color-accent: #3865f2;
+  --color-accent-strong: #2851d8;
   --color-accent-contrast: #ffffff;
-  --color-link: #2563eb;
-  --color-link-hover: #1d4ed8;
-
-  /* 危险色 */
-  --color-danger: #dc2626;
-  --color-danger-strong: #b91c1c;
-
-  /* 输入框 */
-  --color-input-background: #f9fafb;
-
-  /* 工具栏 */
-  --color-toolbar-bg: #eff6ff;
-  --color-toolbar-hover-bg: #dbeafe;
-  --color-toolbar-text: #1d4ed8;
-  --color-toolbar-muted: #6b7280;
-
-  /* 代码块 */
-  --color-code-surface: #f9fafb;
-  --color-code-border: #e5e7eb;
-  --color-code-label: #6b7280;
-  --color-copy-button-bg: #374151;
-  --color-copy-button-hover: #1f2937;
-
-  /* 新消息指示器 */
-  --color-new-indicator-bg: #1f2937;
-
-  /* 表格 */
+  --color-link: #2851d8;
+  --color-link-hover: #183eaf;
+  --color-danger: #bf303f;
+  --color-danger-strong: #a51f2e;
+  --color-danger-surface: #fff1f3;
+  --color-success: #217957;
+  --color-warning: #98600d;
+  --color-input-background: #ffffff;
+  --color-toolbar-bg: #eaf0ff;
+  --color-toolbar-hover-bg: #dbe5ff;
+  --color-toolbar-text: #2851d8;
+  --color-toolbar-muted: #66748a;
+  --color-code-surface: #112037;
+  --color-code-border: #263951;
+  --color-code-label: #b9c8dc;
+  --color-code-text: #dce7f5;
+  --color-code-keyword: #adbbff;
+  --color-code-string: #99e4c8;
+  --color-code-number: #f2c994;
+  --color-code-comment: #91a5bd;
+  --color-copy-button-bg: #263951;
+  --color-copy-button-hover: #354c68;
+  --color-new-indicator-bg: #182235;
   --color-table-bg: #ffffff;
-  --color-table-header-bg: #f9fafb;
-  --color-table-border: #e5e7eb;
-
-  /* 滚动条 */
-  --color-scroll-track: #f3f4f6;
-  --color-scroll-thumb: #d1d5db;
-  --color-scroll-thumb-hover: #9ca3af;
-
-  /* 用户消息气泡 - 纯色，不花哨 */
-  --color-bubble-user: #2563eb;
-  --color-bubble-user-border: #1d4ed8;
-
-  /* 停止按钮 */
-  --color-stop-button-bg: #fef2f2;
-  --color-stop-button-shadow: rgba(220, 38, 38, 0.1);
-  --color-stop-button-text: #dc2626;
-
-  /* 阴影系统 - 精致且有层次感 */
-  --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  --shadow-strong: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --color-table-header-bg: #eef2f8;
+  --color-table-border: #d7dfeb;
+  --color-scroll-track: transparent;
+  --color-scroll-thumb: #c2ccdb;
+  --color-scroll-thumb-hover: #94a3b8;
+  --color-bubble-user: #eaf0ff;
+  --color-bubble-user-border: #dbe5ff;
+  --color-stop-button-bg: #fff1f3;
+  --color-stop-button-shadow: transparent;
+  --color-stop-button-text: #bf303f;
+  --shadow-soft: 0 4px 18px rgb(24 34 53 / 4%);
+  --shadow-medium: 0 8px 28px rgb(24 34 53 / 8%);
+  --shadow-strong: 0 20px 64px rgb(0 8 22 / 24%);
 }
-
-/* 深色模式 */
 :root[data-theme="dark"] {
-  --color-app-background: #020617;
-  --color-panel: #0f172a;
-  --color-panel-alt: #020617;
-  --color-surface: #0f172a;
-  --color-elevated-surface: #1e293b;
-
-  --color-border: #1e293b;
-  --color-border-strong: #334155;
-
-  --color-heading: #f8fafc;
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-muted: #64748b;
-
-  --color-accent: #3b82f6;
-  --color-accent-strong: #2563eb;
-  --color-accent-contrast: #ffffff;
-  --color-link: #60a5fa;
-  --color-link-hover: #93c5fd;
-
-  --color-danger: #f87171;
-  --color-danger-strong: #ef4444;
-
-  --color-input-background: #1e293b;
-
-  --color-toolbar-bg: rgba(59, 130, 246, 0.15);
-  --color-toolbar-hover-bg: rgba(59, 130, 246, 0.25);
-  --color-toolbar-text: #93c5fd;
-  --color-toolbar-muted: #64748b;
-
-  --color-code-surface: #1e293b;
-  --color-code-border: #334155;
-  --color-code-label: #94a3b8;
-  --color-copy-button-bg: #334155;
-  --color-copy-button-hover: #475569;
-
-  --color-new-indicator-bg: #2563eb;
-
-  --color-table-bg: #0f172a;
-  --color-table-header-bg: #1e293b;
-  --color-table-border: #334155;
-
-  --color-scroll-track: #020617;
-  --color-scroll-thumb: #334155;
-  --color-scroll-thumb-hover: #475569;
-
-  --color-bubble-user: #2563eb;
-  --color-bubble-user-border: #3b82f6;
-
-  --color-stop-button-bg: rgba(248, 113, 113, 0.15);
-  --color-stop-button-shadow: rgba(248, 113, 113, 0.2);
-  --color-stop-button-text: #f87171;
-
-  --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
-  --shadow-strong: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+  --color-panel: #162238;
+  --color-panel-alt: #1b2a42;
+  --color-surface: #1c2c45;
+  --color-elevated-surface: #22324c;
+  --color-border: #35455e;
+  --color-border-strong: #566985;
+  --color-heading: #edf3fd;
+  --color-text-primary: #e3ebf8;
+  --color-text-secondary: #b8c6db;
+  --color-muted: #aabbd1;
+  --color-link: #a4bcff;
+  --color-link-hover: #cfdeff;
+  --color-danger: #ffa3ad;
+  --color-danger-strong: #ffbdc4;
+  --color-danger-surface: #412635;
+  --color-success: #88e5c2;
+  --color-warning: #efc383;
+  --color-input-background: #1c2c45;
+  --color-toolbar-bg: #293f66;
+  --color-toolbar-hover-bg: #354e7b;
+  --color-toolbar-text: #c6d5ff;
+  --color-toolbar-muted: #aabbd1;
+  --color-code-surface: #0d192d;
+  --color-code-border: #35455e;
+  --color-code-label: #b9c8dc;
+  --color-new-indicator-bg: #294783;
+  --color-table-bg: #1c2c45;
+  --color-table-header-bg: #22324c;
+  --color-table-border: #35455e;
+  --color-scroll-thumb: #475b79;
+  --color-scroll-thumb-hover: #7389a8;
+  --color-bubble-user: #263d66;
+  --color-bubble-user-border: #354e7b;
+  --color-stop-button-bg: #412635;
+  --color-stop-button-text: #ffa3ad;
+  --shadow-soft: 0 4px 18px rgb(0 8 22 / 10%);
+  --shadow-medium: 0 8px 28px rgb(0 8 22 / 18%);
+  --shadow-strong: 0 20px 64px rgb(0 8 22 / 42%);
 }
-
 *,
 *::before,
 *::after {
@@ -142,28 +121,36 @@
   margin: 0;
   font-weight: normal;
 }
-
 body {
-  min-height: 100vh;
   color: var(--color-text-primary);
   background: var(--color-app-background);
-  transition: color 0.2s ease, background-color 0.2s ease;
-  line-height: 1.6;
-  font-family:
-    Inter,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    Oxygen,
-    Ubuntu,
-    Cantarell,
-    "Fira Sans",
-    "Droid Sans",
-    "Helvetica Neue",
-    sans-serif;
-  font-size: 15px;
+  line-height: 1.75;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 16px;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-normal: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
 }

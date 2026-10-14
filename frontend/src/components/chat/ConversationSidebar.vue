@@ -1,612 +1,543 @@
-<template>
-  <aside class="sidebar">
-    <!-- 左侧栏头部，包含品牌标识、主题切换和新建对话按钮 -->
-    <header class="sidebar-header">
-      <div class="brand-row">
-        <div class="brand">
-        <img 
-        class="logo"
-        :src="logo"
-        >
-        <div class="brand-text">
-          <span class="brand__title">智聊助手</span>
-          <span class="brand__subtitle">{{ brandSubtitle }}</span>
-        </div>
-      </div>
-        <el-button text class="theme-toggle" @click="toggleTheme">
-          <el-icon class="theme-toggle__icon">
-            <component :is="isDark ? Sunny : Moon" />
-          </el-icon>
-          <span>{{ isDark ? "日间模式" : "夜间模式" }}</span>
-        </el-button>
-      </div>
-      <el-button type="primary" class="new-chat-btn" @click="newChat">
-        <el-icon><Plus /></el-icon>
-        <span>新建对话</span>
-      </el-button>
-    </header>
-
-    <!-- 历史记录工具区：搜索框 + 统计信息 -->
-    <div class="sidebar-tools">
-      <el-input
-        v-model="keyword"
-        placeholder="搜索历史对话"
-        clearable
-        :prefix-icon="Search"
-        class="search-input"
-      />
-      <div class="sidebar-stats">
-        <span>共 {{ filteredConversations.length }} 个对话</span>
-        <el-button
-          text
-          size="small"
-          class="clear-btn"
-          @click="clearHistory"
-        >
-          <el-icon><Delete /></el-icon>
-          清空
-        </el-button>
-      </div>
-    </div>
-
-    <!-- 历史会话列表，使用虚拟滚动条保持体验 -->
-    <el-scrollbar ref="listRef" class="conversation-list">
-      <transition-group name="slide-fade" tag="div">
-        <div
-          v-for="conversation in filteredConversations"
-          :key="conversation.name"
-          :class="['conversation-item', { active: conversation.name === sessionStore.curname }]"
-          @click="selectHistory(conversation.name)"
-        >
-          <div class="conversation-item__main">
-            <div class="conversation-item__title">{{ conversation.name }}</div>
-            <div class="conversation-item__meta">
-              <span
-                class="conversation-role"
-                :class="`is-${conversation.roleId}`"
-              >
-                {{ conversation.roleName }}
-              </span>
-              <time class="conversation-item__time">{{ conversation.timeLabel }}</time>
-            </div>
-          </div>
-          <div class="conversation-item__preview">{{ conversation.preview }}</div>
-          <div class="conversation-item__actions" @click.stop>
-            <el-button
-              text
-              size="small"
-              class="rename-btn"
-              @click="renameConversation(conversation.name)"
-            >
-              <el-icon><EditPen /></el-icon>
-            </el-button>
-            <el-button
-              text
-              size="small"
-              class="delete-btn"
-              @click="deleteHistory(conversation.name)"
-            >
-              <el-icon><Close /></el-icon>
-            </el-button>
-          </div>
-        </div>
-      </transition-group>
-
-      <div v-if="!filteredConversations.length" class="empty-state">
-        <el-icon class="empty-state__icon"><ChatDotRound /></el-icon>
-        <p>暂无历史记录，点击“新建对话”开始吧！</p>
-      </div>
-    </el-scrollbar>
-  </aside>
-</template>
-
 <script setup>
 import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, nextTick, ref } from "vue";
-import logoGeneral from "@/assets/logo.svg";
-import logoDeveloper from "@/assets/faviconcode.svg";
-import { getRoleById } from "@/utils/aiRoles";
-
 import {
-  ChatDotRound,
   Close,
-  Delete,
+  ChatDotRound,
   EditPen,
+  Delete,
   Moon,
+  MoreFilled,
   Plus,
   Search,
   Sunny,
 } from "@element-plus/icons-vue";
-
 import { useSessionStore } from "@/stores/session";
 import { useThemeStore } from "@/stores/theme";
+import BackendSettings from "./BackendSettings.vue";
 
 defineOptions({ name: "ConversationSidebar" });
-
-const emit = defineEmits(["callR"]);
+defineProps({ mobile: Boolean, compact: Boolean, closable: Boolean });
+const emit = defineEmits(["callR", "close", "replay-opening", "request-expand"]);
 const sessionStore = useSessionStore();
 const themeStore = useThemeStore();
-
 const keyword = ref("");
 const listRef = ref(null);
-
+const creating = ref(false);
+const historyBusy = ref(false);
 const isDark = computed(() => themeStore.mode === "dark");
-const currentRoleMeta = computed(() => sessionStore.getCurrentRole());
-const brandSubtitle = computed(() =>
-  currentRoleMeta.value.id === "developer" ? "程序开发模式" : "通用问答模式",
-);
-
-const logo = computed(() => {
-  const roleId = sessionStore.currentRole;
-  return roleId === "developer" ? logoDeveloper : logoGeneral;
-});
-
-const toggleTheme = () => {
-  themeStore.toggleMode();
-};
-
-/**
- * 根据会话名称组装摘要信息，包括最后一条消息、更新时间等
- * 供侧边栏列表渲染使用。
- */
-const conversations = computed(() => {
-  const names = sessionStore.getAllSessions();
-  return names.map((name) => {
-    const messages = sessionStore.session[name] ?? [];
-    const lastMessage = messages[messages.length - 1];
-    const time = sessionStore.time[name] ?? 0;
-    const role = getRoleById(sessionStore.sessionRoles[name]);
-
-    const attachmentNames = Array.isArray(lastMessage?.attachments)
-      ? lastMessage.attachments.map((item) => item.name).join("、")
-      : "";
-
-    const previewText = lastMessage?.content?.trim()
-      ? lastMessage.content.replace(/\s+/g, " ")
-      : attachmentNames
-      ? `附件: ${attachmentNames}`
-      : "空对话";
-
-    return {
-      name,
-      updatedAt: time,
-      preview: previewText.slice(0, 50),
-      roleId: role.id,
-      roleName: role.name,
-    };
-  });
-});
-
-/**
- * 结合搜索关键字过滤、排序会话，使最近的记录优先显示。
- */
+const hasQuery = computed(() => !!keyword.value.trim());
 const filteredConversations = computed(() => {
   const query = keyword.value.trim().toLowerCase();
-
-  return conversations.value
-    .map((conversation) => ({
-      ...conversation,
-      timeLabel: formatTime(conversation.updatedAt),
-    }))
-    .filter((conversation) =>
-      !query ||
-      conversation.name.toLowerCase().includes(query) ||
-      conversation.preview.toLowerCase().includes(query),
-    )
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return sessionStore.visibleConversations.filter(
+    (item) => !query || `${item.title} ${item.preview}`.toLowerCase().includes(query),
+  );
 });
-
-/**
- * 将时间戳转换为可读的“刚刚/几分钟前”形式，提升可读性。
- */
-const formatTime = (timestamp) => {
-  if (!timestamp) return "未开始";
-  const diff = Date.now() - timestamp;
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-
-  if (diff < minute) return "刚刚";
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
-  return new Date(timestamp).toLocaleString();
-};
-
-/**
- * 新建对话或切换到待输入的占位对话，并在成功创建后给出提示。
- */
+const conversationGroups = computed(() => {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const groups = [
+    { label: "今天", items: [] },
+    { label: "昨天", items: [] },
+    { label: "更早", items: [] },
+  ];
+  filteredConversations.value.forEach((conversation) => {
+    const date = conversation.updated_at ? new Date(conversation.updated_at).toDateString() : "";
+    const group = date === today.toDateString() ? 0 : date === yesterday.toDateString() ? 1 : 2;
+    groups[group].items.push(conversation);
+  });
+  return groups.filter((group) => group.items.length);
+});
 const newChat = async () => {
-  const { created } = sessionStore.newchat();
-  keyword.value = "";
-  await nextTick();
-  listRef.value?.setScrollTop?.(0);
-  if (created) {
-    ElMessage.success("已创建新对话");
-  } else {
-    ElMessage.info("已切换到等待输入的新对话");
+  if (creating.value) return;
+  creating.value = true;
+  try {
+    const item = await sessionStore.newConversation();
+    keyword.value = "";
+    emit("callR", item.id);
+    await nextTick();
+    listRef.value?.setScrollTop?.(0);
+  } catch (error) {
+    sessionStore.reportError(error);
+  } finally {
+    creating.value = false;
   }
 };
-
-/**
- * 清空所有历史记录，二次确认后调用 Pinia Store 的清理方法。
- */
-const clearHistory = () => {
-  if (!sessionStore.getAllSessions().length) {
+const clearHistory = async () => {
+  if (!sessionStore.visibleConversations.length || historyBusy.value) return;
+  historyBusy.value = true;
+  try {
+    try {
+      await ElMessageBox.confirm("确认清空全部对话记录吗？正在生成的回复会先停止。", "清空历史", {
+        confirmButtonText: "清空",
+        cancelButtonText: "取消",
+        type: "warning",
+      });
+    } catch {
+      return;
+    }
+    await sessionStore.clear();
+    keyword.value = "";
+    ElMessage.success("已清空历史对话");
+  } catch (error) {
+    sessionStore.reportError(error);
+  } finally {
+    historyBusy.value = false;
+  }
+};
+const deleteHistory = async (item) => {
+  if (historyBusy.value) return;
+  historyBusy.value = true;
+  try {
+    try {
+      await ElMessageBox.confirm(`确认删除“${item.title}”吗？此操作无法恢复。`, "删除对话", {
+        confirmButtonText: "删除",
+        cancelButtonText: "取消",
+        type: "warning",
+      });
+    } catch {
+      return;
+    }
+    await sessionStore.deleteConversation(item.id);
+    ElMessage.success("对话已删除");
+  } catch (error) {
+    sessionStore.reportError(error);
+  } finally {
+    historyBusy.value = false;
+  }
+};
+const renameConversation = async (item) => {
+  let value;
+  try {
+    ({ value } = await ElMessageBox.prompt("请输入新的对话标题", "重命名对话", {
+      inputValue: item.title,
+      confirmButtonText: "保存",
+      cancelButtonText: "取消",
+      inputValidator: (text) => !!text?.trim() || "标题不能为空",
+    }));
+  } catch {
     return;
   }
-
-  ElMessageBox.confirm("确认清空全部对话记录吗？", "清空历史", {
-    confirmButtonText: "清空",
-    cancelButtonText: "取消",
-    type: "warning",
-    center: true,
-  })
-    .then(() => {
-      sessionStore.clear();
-      keyword.value = "";
-      ElMessage.success("已清空历史对话");
-    })
-    .catch(() => {});
+  try {
+    await sessionStore.renameConversation(item.id, value.trim());
+    ElMessage.success("标题已更新");
+  } catch (error) {
+    sessionStore.reportError(error);
+  }
 };
-
-/**
- * 删除单个历史记录并展示成功提示。
- */
-const deleteHistory = (name) => {
-  sessionStore.deletehistory(name);
-  ElMessage.success("对话已删除");
-};
-
-/**
- * 通知父组件切换当前会话，避免在侧边栏内直接修改消息列表。
- */
-const selectHistory = (name) => {
-  emit("callR", name);
-};
-
-/**
- * 触发重命名弹窗，校验输入后更新当前会话标题。
- */
-const renameConversation = (name) => {
-  ElMessageBox.prompt("请输入新的对话标题", "重命名对话", {
-    inputValue: name,
-    confirmButtonText: "保存",
-    cancelButtonText: "取消",
-    center: true,
-  })
-    .then(({ value }) => {
-      if (!value.trim()) {
-        ElMessage.warning("标题不能为空");
-        return;
-      }
-      if (value === name) return;
-      sessionStore.selecthistory(name);
-      sessionStore.updateTitle(value.trim());
-      ElMessage.success("标题已更新");
-    })
-    .catch(() => {});
+const conversationCommand = (command, item) => {
+  if (command === "rename") renameConversation(item);
+  else if (command === "delete") deleteHistory(item);
 };
 </script>
 
-<style scoped>
+<template>
+  <aside class="sidebar" :class="{ 'is-compact': compact }">
+    <div class="brand-row">
+      <div id="echo-sidebar-brand" class="brand-dock"></div>
+      <span v-if="mobile" class="brand-title">EchoChat</span>
+      <button
+        v-if="mobile || closable"
+        class="icon-button"
+        aria-label="关闭侧栏"
+        title="关闭侧栏"
+        @click="emit('close')"
+      >
+        <el-icon><Close /></el-icon>
+      </button>
+    </div>
+    <el-button
+      type="primary"
+      class="new-chat-btn"
+      aria-label="新建对话"
+      :title="compact ? '新建对话' : undefined"
+      :loading="creating"
+      :disabled="!sessionStore.ready || creating"
+      @click="newChat"
+      ><el-icon><Plus /></el-icon><span v-if="!compact">新建对话</span></el-button
+    >
+    <template v-if="compact">
+      <button
+        class="icon-button rail-button"
+        aria-label="搜索对话"
+        title="搜索对话"
+        @click="emit('request-expand', 'search')"
+      >
+        <el-icon><Search /></el-icon>
+      </button>
+      <button
+        class="icon-button rail-button"
+        aria-label="历史对话"
+        title="历史对话"
+        @click="emit('request-expand', 'history')"
+      >
+        <el-icon><ChatDotRound /></el-icon>
+      </button>
+      <div class="rail-spacer"></div>
+    </template>
+    <template v-else>
+      <el-input
+        v-model="keyword"
+        placeholder="搜索对话"
+        clearable
+        :prefix-icon="Search"
+        class="search-input"
+        aria-label="搜索对话"
+      />
+      <div class="history-heading">
+        <span>对话</span><span>{{ filteredConversations.length }}</span>
+      </div>
+      <el-scrollbar ref="listRef" class="conversation-list">
+        <section
+          v-for="group in conversationGroups"
+          :key="group.label"
+          class="history-group"
+          :aria-label="group.label"
+        >
+          <h2 class="history-group__heading">{{ group.label }}</h2>
+          <div
+            v-for="conversation in group.items"
+            :key="conversation.id"
+            class="conversation-item"
+            :class="{ active: conversation.id === sessionStore.currentId }"
+          >
+            <button
+              class="conversation-select"
+              :aria-label="conversation.title"
+              :aria-current="conversation.id === sessionStore.currentId ? 'page' : undefined"
+              @click="emit('callR', conversation.id)"
+            >
+              <span class="conversation-item__title" :title="conversation.title">{{
+                conversation.title
+              }}</span>
+              <span v-if="hasQuery" class="conversation-item__preview">{{
+                conversation.preview
+              }}</span>
+            </button>
+            <el-dropdown
+              class="conversation-dropdown"
+              trigger="click"
+              @command="(command) => conversationCommand(command, conversation)"
+              @click.stop
+            >
+              <button
+                class="icon-button conversation-more"
+                aria-label="对话操作"
+                title="对话操作"
+                :disabled="historyBusy"
+              >
+                <el-icon><MoreFilled /></el-icon>
+              </button>
+              <template #dropdown
+                ><el-dropdown-menu>
+                  <el-dropdown-item command="rename" :icon="EditPen">重命名对话</el-dropdown-item>
+                  <el-dropdown-item command="delete" :icon="Delete" :disabled="historyBusy"
+                    >删除对话</el-dropdown-item
+                  >
+                </el-dropdown-menu></template
+              >
+            </el-dropdown>
+          </div>
+        </section>
+        <p v-if="!filteredConversations.length" class="empty-state">
+          {{ hasQuery ? "没有找到相关对话" : "对话会保存在这里" }}
+        </p>
+      </el-scrollbar>
+    </template>
+    <footer class="sidebar-footer">
+      <BackendSettings
+        :compact="compact"
+        :history-busy="historyBusy"
+        @clear-history="clearHistory"
+        @replay-opening="emit('replay-opening')"
+      />
+      <button
+        class="icon-button"
+        :aria-label="isDark ? '日间模式' : '夜间模式'"
+        :title="isDark ? '日间模式' : '夜间模式'"
+        @click="themeStore.toggleMode()"
+      >
+        <el-icon><component :is="isDark ? Sunny : Moon" /></el-icon>
+      </button>
+    </footer>
+  </aside>
+</template>
 
+<style scoped>
 .sidebar {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 20px 18px;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-3) var(--space-3);
+  color: var(--color-sidebar-text);
   background: var(--color-sidebar-surface);
-  border-right: 1px solid var(--color-border-strong);
-  color: var(--color-text-primary);
+  border-radius: inherit;
 }
-
-.sidebar-header {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.logo {
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
-  background: var(--color-surface);
-  padding: 8px;
-  box-shadow: var(--shadow-medium);
-  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
 .brand-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-2);
+  min-height: 32px;
+  margin-bottom: var(--space-2);
+  padding: 0 var(--space-2);
 }
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.brand-dock {
+  flex: 1;
+  min-width: 0;
 }
-
-.brand-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.brand-dock :deep(.echo-brand) {
+  color: var(--color-sidebar-text);
 }
-
-.brand__title {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--color-heading);
+.brand-title {
+  flex: 1;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.4px;
 }
-
-.brand__subtitle {
-  font-size: 12px;
-  color: var(--color-muted);
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
-}
-
-.theme-toggle {
-  border-radius: 999px !important;
-  padding: 6px 12px !important;
-  height: auto !important;
-  color: var(--color-text-secondary) !important;
-  background-color: transparent !important;
-  border: none !important;
-  transition: background-color 0.2s ease, color 0.2s ease !important;
-}
-
-.theme-toggle:hover {
-  color: var(--color-heading) !important;
-  background-color: rgba(148, 163, 184, 0.16) !important;
-}
-
-.theme-toggle__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: inherit;
-}
-
-.theme-toggle span {
-  font-size: 12px;
-}
-
 .new-chat-btn {
-  width: 100%;
-  height: 44px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
-  border: none;
-  box-shadow: var(--shadow-soft);
-  color: var(--color-accent-contrast);
+  min-height: 44px;
+  margin: 0;
+  border-color: transparent;
+  border-radius: var(--radius-control);
+  background: var(--color-accent);
+  color: white;
+  box-shadow: none;
+  font-size: 14px;
+  transition:
+    background var(--motion-fast),
+    transform var(--motion-fast);
 }
-
-.new-chat-btn span {
-  margin-left: 6px;
+.new-chat-btn :deep(span) {
+  gap: var(--space-2);
 }
-
-.sidebar-tools {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.new-chat-btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--color-accent) 90%, white);
+  transform: translateY(-1px);
 }
-
+.new-chat-btn:not(:disabled):active {
+  transform: scale(0.98);
+}
+.new-chat-btn:disabled {
+  color: var(--color-sidebar-muted);
+  background: var(--color-sidebar-hover);
+}
 .search-input :deep(.el-input__wrapper) {
-  border-radius: 14px;
-  background: var(--color-input-background);
-  border: 1px solid var(--color-border);
-  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+  min-height: 36px;
+  border-radius: var(--radius-control);
+  background: var(--color-shell);
+  box-shadow: 0 0 0 1px var(--color-sidebar-border) inset;
+  transition: box-shadow var(--motion-fast);
 }
-
-.sidebar-stats {
+.search-input :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--color-accent) inset;
+}
+.search-input :deep(.el-input__inner) {
+  color: var(--color-sidebar-text);
+  font-size: 13px;
+}
+.search-input :deep(.el-input__inner::placeholder),
+.search-input :deep(.el-input__icon) {
+  color: var(--color-sidebar-muted);
+}
+.history-heading {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  padding: 0 var(--space-2);
+  color: var(--color-sidebar-muted);
   font-size: 12px;
-  color: var(--color-muted);
 }
-
-.clear-btn {
-  color: var(--color-danger);
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.clear-btn:hover {
-  color: var(--color-danger-strong);
-}
-
 .conversation-list {
   flex: 1;
-  overflow: hidden;
+  min-height: 0;
 }
-
+.history-group + .history-group {
+  margin-top: var(--space-4);
+}
+.history-group__heading {
+  margin: 0 0 var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  color: var(--color-sidebar-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
 .conversation-item {
   position: relative;
-  padding: 14px 16px;
-  border-radius: 16px;
-  background: var(--color-surface);
-  box-shadow: var(--shadow-soft);
-  margin-bottom: 12px;
-  cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-  border: 1px solid transparent;
-  color: inherit;
-}
-
-.conversation-item:last-child {
-  margin-bottom: 0;
-}
-
-.conversation-item:hover {
-  transform: translateX(4px);
-  box-shadow: var(--shadow-strong);
-}
-
-.conversation-item.active {
-  border-color: var(--color-accent);
-  box-shadow: var(--shadow-strong);
-}
-
-.conversation-item__main {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 6px;
+  margin-bottom: var(--space-1);
+  padding-right: var(--space-1);
+  border-radius: var(--radius-list);
+  transition: background var(--motion-fast);
 }
-
+.conversation-item:hover {
+  background: var(--color-sidebar-hover);
+}
+.conversation-item.active {
+  background: var(--color-sidebar-hover);
+}
+.conversation-item.active::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-brand-mint);
+}
+.conversation-select {
+  display: block;
+  min-width: 0;
+  min-height: 40px;
+  flex: 1;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-list);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .conversation-item__title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  max-width: 70%;
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
 }
-
-.conversation-item__meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+.conversation-item__preview {
+  display: block;
+  margin-top: var(--space-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-sidebar-muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+.conversation-dropdown {
   flex: 0 0 auto;
 }
-
-.conversation-role {
+.icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-sidebar-muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast),
+    color var(--motion-fast),
+    opacity var(--motion-fast);
 }
-
-.conversation-role.is-general {
-  background: rgba(16, 185, 129, 0.12);
-  color: #047857;
+.icon-button:hover,
+.icon-button:focus-visible {
+  background: var(--color-sidebar-hover);
+  color: var(--color-sidebar-text);
 }
-
-.conversation-role.is-developer {
-  background: rgba(37, 99, 235, 0.12);
-  color: #1d4ed8;
+.icon-button:focus-visible,
+.conversation-select:focus-visible,
+.new-chat-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
-
-.conversation-item__time {
-  font-size: 11px;
-  color: var(--color-muted);
+.icon-button:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
-
-.conversation-item__preview {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  line-height: 1.5;
-  height: 3em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.conversation-item__actions {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: flex;
-  gap: 6px;
+.conversation-more {
+  width: 28px;
+  height: 28px;
   opacity: 0;
-  transition: opacity 0.2s ease;
 }
-
-.conversation-item:hover .conversation-item__actions,
-.conversation-item.active .conversation-item__actions {
+.conversation-item:hover .conversation-more,
+.conversation-item:focus-within .conversation-more {
   opacity: 1;
 }
-
-.rename-btn,
-.delete-btn {
-  color: var(--color-muted);
-}
-
-.rename-btn:hover,
-.delete-btn:hover {
-  color: var(--color-text-primary);
-}
-
 .empty-state {
-  margin-top: 80px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  color: var(--color-muted);
+  padding: var(--space-6) var(--space-2);
   text-align: center;
+  color: var(--color-sidebar-muted);
+  font-size: 13px;
 }
-
-.empty-state__icon {
-  font-size: 32px;
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-sidebar-border);
 }
-
-.slide-fade-enter-active,
-.slide-fade-leave-active {
-  transition: all 0.2s ease;
+.rail-spacer {
+  flex: 1;
 }
-
-.slide-fade-enter-from,
-.slide-fade-leave-to {
-  opacity: 0;
-  transform: translateX(-8px);
+.is-compact {
+  align-items: center;
+  padding-inline: 14px;
 }
-
-@media (max-width: 960px) {
-  .sidebar {
-    padding: 16px;
-  }
+.is-compact .brand-row {
+  width: 44px;
+  justify-content: center;
+  padding: 0;
 }
-
-@media (max-width: 1024px) {
-  .sidebar {
-    width: 100%;
-    max-width: none;
-    border-right: none;
-    border-bottom: 1px solid var(--color-border-strong);
-    box-shadow: none;
-  }
-
-  .sidebar-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .brand-row {
-    align-items: flex-start;
-  }
-
-  .new-chat-btn {
-    height: 42px;
-  }
-
-  .conversation-list {
-    padding-bottom: 80px;
+.is-compact .brand-dock {
+  display: flex;
+  justify-content: center;
+}
+.is-compact :deep(.echo-title) {
+  display: none;
+}
+.is-compact .new-chat-btn,
+.rail-button {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+}
+.rail-button {
+  font-size: 20px;
+}
+.is-compact .sidebar-footer {
+  width: 44px;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.is-compact .sidebar-footer > .icon-button {
+  width: 40px;
+  height: 40px;
+}
+@media (hover: none) {
+  .conversation-more {
+    opacity: 1;
   }
 }
-
-@media (max-width: 640px) {
-  .sidebar {
-    padding: 16px 14px 24px;
+@media (max-width: 767px) {
+  .icon-button,
+  .conversation-more {
+    width: 44px;
+    height: 44px;
   }
-
-  .brand__title {
-    font-size: 20px;
+  .conversation-select {
+    min-height: 44px;
   }
-
-  .conversation-item {
-    padding: 12px 14px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar *,
+  .sidebar :deep(.el-input__wrapper) {
+    transition: none;
+  }
+  .new-chat-btn:not(:disabled):hover,
+  .new-chat-btn:not(:disabled):active {
+    transform: none;
   }
 }
 </style>

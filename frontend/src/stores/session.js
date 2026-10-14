@@ -1,434 +1,263 @@
-import { ref, computed } from "vue";
+import { computed, markRaw, ref } from "vue";
 import { defineStore } from "pinia";
-import { AI_ROLES, getRoleById } from "@/utils/aiRoles";
-import { DEEPSEEK_MODES, getDeepSeekMode } from "@/config/deepseekModes";
+import { api, stream } from "../apis/backend.js";
 
-// 默认会话名称，用于初始化以及兜底
-const DEFAULT_SESSION_NAME = "新对话";
-// 默认角色 ID
-const DEFAULT_ROLE = "general";
-
-const MODEL_OPTIONS = DEEPSEEK_MODES;
-
-const formatFileSize = (size) => {
-  if (size < 1024) return `${size}B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)}KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)}MB`;
+const PREFERENCE_KEY = "echochat.preferences";
+const readPreferences = () => {
+  try { return JSON.parse(localStorage.getItem(PREFERENCE_KEY)) || {}; }
+  catch { return {}; }
 };
 
-// 将附件对象描述为更易读的字符串，方便拼接到模型上下文
-const describeAttachment = (attachment) => {
-  if (!attachment) return "";
-  const { name, size, type, body, note } = attachment;
-  const header = [`文件名: ${name}`, `大小: ${formatFileSize(size)}`];
-  if (type) {
-    header.push(`类型: ${type}`);
-  }
+export const useSessionStore = defineStore("chat", () => {
+  const preferences = readPreferences();
+  const conversations = ref({});
+  const messagesByConversation = ref({});
+  const pages = ref({});
+  const drafts = ref({});
+  const currentId = ref(preferences.currentId || null);
+  const model = ref(preferences.model || "");
+  const options = ref(null);
+  const configured = ref(false);
+  const keySettingsOpen = ref(false);
+  const ready = ref(false);
+  const loading = ref(false);
+  const error = ref("");
+  const activeGeneration = ref(null);
+  let generation;
+  let initialization;
+  const currentConversation = computed(() => conversations.value[currentId.value]);
+  const currentRole = computed(() => currentConversation.value?.current_role_id);
+  const currentRoleMeta = computed(() => options.value?.roles.find((role) => role.id === currentRole.value));
+  const messages = computed(() => messagesByConversation.value[currentId.value] || []);
+  const visibleConversations = computed(() => Object.values(conversations.value)
+    .filter((item) => item.message_count > 0)
+    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at)));
+  const isGenerating = computed(() => !!activeGeneration.value);
+  const currentDraft = computed(() => {
+    if (!currentId.value) return { text: "", files: [] };
+    if (!drafts.value[currentId.value]) drafts.value[currentId.value] = { text: "", files: [] };
+    return drafts.value[currentId.value];
+  });
+  const remember = () => localStorage.setItem(PREFERENCE_KEY, JSON.stringify({ currentId: currentId.value, model: model.value }));
+  const reportError = (value) => { error.value = value?.message || String(value); };
+  const setModel = (value) => {
+    if (!options.value?.modes.some((item) => item.value === value)) return;
+    model.value = value; remember();
+  };
+  const upsertConversation = (item) => {
+    if (item) conversations.value[item.id] = item;
+  };
+  const upsertMessage = (item) => {
+    if (!item || !conversations.value[item.conversation_id]) return;
+    messagesByConversation.value[item.conversation_id] ||= [];
+    const list = messagesByConversation.value[item.conversation_id];
+    const index = list.findIndex((message) => message.id === item.id);
+    if (index < 0) list.push(item);
+    else list[index] = item;
+    list.sort((a, b) => a.seq - b.seq);
+  };
+  const loadMessages = async (id, older = false) => {
+    pages.value[id] ||= { loading: false, has_more: false };
+    const page = pages.value[id];
+    if (page.loading) return;
+    page.loading = true;
+    try {
+      const streamingId = generation?.conversationId === id ? generation.messageId : null;
+      const before = older ? messagesByConversation.value[id]?.[0]?.seq : null;
+      const result = await api(`/conversations/${id}/messages?limit=100${before ? `&before_seq=${before}` : ""}`);
+      if (!conversations.value[id]) return;
+      const activeId = generation?.conversationId === id ? generation.messageId : streamingId;
+      const active = activeId && messagesByConversation.value[id]?.find((item) => item.id === activeId);
+      const combined = new Map((older ? messagesByConversation.value[id] || [] : []).map((item) => [item.id, item]));
+      result.items.forEach((item) => combined.set(item.id, item));
+      // A database snapshot during a stream can lag behind its live deltas.
+      if (active) combined.set(active.id, active);
+      messagesByConversation.value[id] = [...combined.values()].sort((a, b) => a.seq - b.seq);
+      page.has_more = result.has_more;
+    } finally { page.loading = false; }
+  };
+  const selectConversation = async (id) => {
+    currentId.value = id; remember();
+    if (!messagesByConversation.value[id]) await loadMessages(id);
+  };
+  const newConversation = async () => {
+    const item = await api("/conversations", { method: "POST", body: {} });
+    upsertConversation(item);
+    messagesByConversation.value[item.id] ||= [];
+    await selectConversation(item.id);
+    return item;
+  };
+  const refreshConversations = async () => {
+    const result = await api("/conversations?include_empty=true");
+    conversations.value = Object.fromEntries(result.items.map((item) => [item.id, item]));
+  };
+  const initialize = async () => {
+    if (initialization) return initialization;
+    loading.value = true; error.value = "";
+    initialization = (async () => {
+      const [config, credential] = await Promise.all([api("/options"), api("/credentials/deepseek")]);
+      options.value = config; configured.value = credential.configured;
+      if (!config.modes.some((item) => item.value === model.value)) model.value = config.modes[0]?.value || "";
+      await refreshConversations();
+      if (!conversations.value[currentId.value]) currentId.value = visibleConversations.value[0]?.id || null;
+      if (currentId.value) await loadMessages(currentId.value);
+      else await newConversation();
+      remember(); ready.value = true;
+    })();
+    try { await initialization; }
+    catch (cause) { reportError(cause); throw cause; }
+    finally { loading.value = false; initialization = null; }
+  };
+  const configureKey = async (key) => {
+    configured.value = (await api("/credentials/deepseek", { method: "PUT", body: { api_key: key } })).configured;
+  };
+  const clearKey = async () => {
+    configured.value = (await api("/credentials/deepseek", { method: "DELETE" })).configured;
+  };
+  const renameConversation = async (id, title) => upsertConversation(await api(`/conversations/${id}`, { method: "PATCH", body: { title } }));
+  const setRole = async (role_id) => upsertConversation(await api(`/conversations/${currentId.value}`, { method: "PATCH", body: { role_id } }));
+  const setDraftText = (text) => { if (currentId.value) currentDraft.value.text = text; };
+  const addFiles = (files) => { currentDraft.value.files.push(...files.map((file) => markRaw(file))); };
+  const removeFile = (index) => { currentDraft.value.files.splice(index, 1); };
 
-  const bodyText = body
-    ? `内容预览:\n${(body || "").slice(0, 4000)}`
-    : note || "未提供内容";
-
-  return `${header.join(" | ")}\n${bodyText}`;
-};
-
-export const useSessionStore = defineStore(
-  "session",
-  () => {
-    const session = ref({ [DEFAULT_SESSION_NAME]: [] });
-    const curname = ref(DEFAULT_SESSION_NAME);
-    const time = ref({});
-    const visibility = ref({ [DEFAULT_SESSION_NAME]: false });
-    const pendingConversation = ref(DEFAULT_SESSION_NAME);
-    const model = ref(MODEL_OPTIONS[0].value);
-    const sessionRoles = ref({ [DEFAULT_SESSION_NAME]: DEFAULT_ROLE });
-    const roleContextStart = ref({ [DEFAULT_SESSION_NAME]: 0 });
-
-    if ((session.value[DEFAULT_SESSION_NAME]?.length ?? 0) > 0) {
-      visibility.value[DEFAULT_SESSION_NAME] = true;
-      pendingConversation.value = null;
+  const cancelGeneration = async () => {
+    const run = generation;
+    if (!run) return;
+    run.cancelRequested = true;
+    activeGeneration.value.cancelling = true;
+    if (run.cancellation) return run.cancellation;
+    run.cancellation = (async () => {
+      // A stop during validation must also wait for the eventual accepted request.
+      await run.started;
+      if (!run.messageId) return;
+      const result = await api(`/generations/${run.requestId}/cancel`, { method: "POST" });
+      if (result.message) upsertMessage(result.message);
+      else upsertMessage(await api(`/messages/${run.messageId}`));
+      run.terminal = true;
+      run.controller.abort();
+    })();
+    try { await run.cancellation; }
+    catch (cause) {
+      run.cancelRequested = false; run.cancellation = null;
+      if (generation === run) activeGeneration.value.cancelling = false;
+      reportError(cause); throw cause;
     }
+  };
 
-    /**
-     * 确保某个会话的相关数据结构已初始化，避免访问 undefined。
-     */
-    const ensureConversation = (
-      name = curname.value,
-      { makeVisibleIfNew = true } = {},
-    ) => {
-      const exists = !!session.value[name];
-
-      if (!exists) {
-        session.value[name] = [];
-      }
-      if (time.value[name] === undefined) {
-        time.value[name] = exists ? Date.now() : 0;
-      }
-      if (sessionRoles.value[name] === undefined) {
-        sessionRoles.value[name] = DEFAULT_ROLE;
-      }
-      if (roleContextStart.value[name] === undefined) {
-        roleContextStart.value[name] = 0;
-      }
-
-      if (visibility.value[name] === undefined) {
-        visibility.value[name] = session.value[name].length > 0;
-      }
-
-      if (!exists && !makeVisibleIfNew) {
-        visibility.value[name] = false;
-        pendingConversation.value = name;
-      } else if (!exists) {
-        visibility.value[name] = true;
-      }
+  const generate = async ({ target, draft }) => {
+    if (generation) throw new Error("请等待当前回复完成或先停止生成");
+    if (!configured.value) throw new Error("请先在 API Key 设置中配置密钥");
+    const conversationId = target?.conversation_id || currentId.value;
+    const run = {
+      conversationId, requestId: crypto.randomUUID(), messageId: null,
+      controller: markRaw(new AbortController()), terminal: false, cancelRequested: false,
     };
-
-    const generateConversationName = () => {
-      const base = DEFAULT_SESSION_NAME;
-      if (!session.value[base]) {
-        return base;
-      }
-
-      let index = 1;
-      let candidate = `${base} ${index}`;
-      while (session.value[candidate]) {
-        index += 1;
-        candidate = `${base} ${index}`;
-      }
-      return candidate;
-    };
-
-    /**
-     * 向当前会话追加一条消息，同时记录最近活跃时间。
-     */
-    const sessionpush = (msg) => {
-      const key = curname.value;
-      ensureConversation(key);
-      const normalized = {
-        role: msg.role,
-        content: msg.content ?? "",
-        attachments: Array.isArray(msg.attachments) ? msg.attachments : [],
-        roleId: msg.roleId ?? sessionRoles.value[key],
-      };
-      session.value[key].push(normalized);
-      time.value[key] = Date.now();
-      visibility.value[key] = true;
-      if (pendingConversation.value === key) {
-        pendingConversation.value = null;
-      }
-    };
-
-    const setModel = (value) => {
-      model.value = getDeepSeekMode(value).value;
-    };
-
-    // 设置当前 AI 角色（仅对当前会话生效）
-    const setRole = (roleId) => {
-      if (AI_ROLES[roleId]) {
-        ensureConversation();
-        const key = curname.value;
-        const previousRole = sessionRoles.value[key];
-
-        if (previousRole === roleId) {
-          return;
+    run.started = new Promise((resolve) => { run.resolveStarted = resolve; });
+    generation = run;
+    activeGeneration.value = { conversationId, requestId: run.requestId, messageId: null, cancelling: false };
+    error.value = "";
+    let body;
+    if (target) body = { request_id: run.requestId, mode: model.value };
+    else {
+      body = new FormData();
+      body.set("text", draft.text.trim()); body.set("mode", model.value); body.set("request_id", run.requestId);
+      draft.files.forEach((file) => body.append("files", file));
+    }
+    try {
+      await stream(target ? `/messages/${target.id}/regenerate` : `/conversations/${conversationId}/messages`, body, run.controller.signal, (kind, event) => {
+        if (generation !== run || run.terminal || event.request_id !== run.requestId || event.conversation_id !== conversationId) return;
+        if (kind === "started") {
+          run.messageId = event.assistant_message.id;
+          activeGeneration.value.messageId = run.messageId;
+          run.resolveStarted();
+          if (target) messagesByConversation.value[conversationId] = (messagesByConversation.value[conversationId] || []).filter((item) => item.seq < target.seq);
+          upsertConversation(event.conversation); upsertMessage(event.user_message); upsertMessage(event.assistant_message);
+          const current = drafts.value[conversationId];
+          if (draft && current) {
+            if (current.text === draft.text) current.text = "";
+            current.files = current.files.filter((file) => !draft.files.includes(file));
+          }
+          if (run.cancelRequested) void cancelGeneration().catch(reportError);
+        } else if (kind === "delta" && !run.cancelRequested && !run.terminal) {
+          const item = messagesByConversation.value[conversationId]?.find((message) => message.id === event.message_id && message.id === run.messageId);
+          if (item) {
+            item.content += event.content || "";
+            item.reasoning_content = (item.reasoning_content || "") + (event.reasoning_content || "");
+          }
+        } else if (kind === "done" || kind === "error") {
+          run.terminal = true; upsertConversation(event.conversation); upsertMessage(event.message);
+          if (kind === "error") reportError(event.message_text || event.message?.error_message || "回复生成失败");
         }
-
-        sessionRoles.value[key] = roleId;
-
-        if ((session.value[key]?.length ?? 0) > 0) {
-          roleContextStart.value[key] = session.value[key].length;
-        }
-      }
-    };
-
-    // 获取当前角色配置
-    const getCurrentRole = () => {
-      ensureConversation();
-      return getRoleById(sessionRoles.value[curname.value]);
-    };
-
-    // 计算属性形式的当前角色（用于 v-model 绑定）
-    const currentRole = computed({
-      get: () => {
-        ensureConversation();
-        const roleId = sessionRoles.value[curname.value];
-        return AI_ROLES[roleId] ? roleId : DEFAULT_ROLE;
-      },
-      set: (roleId) => {
-        setRole(roleId);
-      },
-    });
-
-    /**
-     * 返回所有可见会话的名称列表。
-     */
-    const getAllSessions = () =>
-      Object.keys(session.value).filter((name) => {
-        if (visibility.value[name] === undefined) {
-          visibility.value[name] = session.value[name].length > 0;
-        }
-        return visibility.value[name] !== false;
       });
-
-    /**
-     * 创建一个空白会话，标记为待输入状态。
-     */
-    const createBlankConversation = (name) => {
-      session.value[name] = [];
-      time.value[name] = 0;
-      sessionRoles.value[name] = DEFAULT_ROLE;
-      roleContextStart.value[name] = 0;
-      visibility.value[name] = false;
-      pendingConversation.value = name;
-    };
-
-    /**
-     * 清空所有历史记录并创建新的占位会话。
-     */
-    const clear = () => {
-      session.value = {};
-      time.value = {};
-      sessionRoles.value = {};
-      roleContextStart.value = {};
-      visibility.value = {};
-      const name = generateConversationName();
-      createBlankConversation(name);
-      curname.value = name;
-    };
-
-    /**
-     * 更新当前会话标题，若目标标题已存在则切换到该会话。
-     */
-    const updateTitle = (newTitle) => {
-      const trimmed = newTitle?.trim();
-      if (!trimmed) {
-        return;
-      }
-
-      const current = curname.value;
-      if (trimmed === current) {
-        return;
-      }
-
-      if (session.value[trimmed]) {
-        curname.value = trimmed;
-        visibility.value[trimmed] = true;
-        pendingConversation.value = null;
-        return;
-      }
-
-      ensureConversation(current);
-
-      session.value[trimmed] = session.value[current];
-      sessionRoles.value[trimmed] = sessionRoles.value[current];
-      roleContextStart.value[trimmed] = roleContextStart.value[current];
-      if (time.value[current]) {
-        time.value[trimmed] = time.value[current];
-      }
-
-      visibility.value[trimmed] = true;
-
-      delete session.value[current];
-      delete sessionRoles.value[current];
-      delete roleContextStart.value[current];
-      delete time.value[current];
-      delete visibility.value[current];
-
-      curname.value = trimmed;
-      pendingConversation.value = null;
-    };
-
-    const removeMessageAt = (index) => {
-      ensureConversation();
-      const key = curname.value;
-      const messages = session.value[key];
-      if (!messages || index < 0 || index >= messages.length) {
-        return;
-      }
-
-      messages.splice(index, 1);
-
-      const currentContextStart = roleContextStart.value[key] ?? 0;
-      if (index < currentContextStart) {
-        roleContextStart.value[key] = Math.max(0, currentContextStart - 1);
-      } else {
-        roleContextStart.value[key] = Math.min(
-          currentContextStart,
-          messages.length,
-        );
-      }
-
-      if (!messages.length) {
-        time.value[key] = 0;
-        roleContextStart.value[key] = 0;
-      }
-    };
-
-    const trimMessagesFrom = (startIndex) => {
-      ensureConversation();
-      const key = curname.value;
-      const messages = session.value[key];
-      if (!messages || startIndex < 0) {
-        return;
-      }
-
-      if (startIndex < messages.length) {
-        session.value[key] = messages.slice(0, startIndex);
-        roleContextStart.value[key] = Math.min(
-          roleContextStart.value[key] ?? 0,
-          session.value[key].length,
-        );
-      }
-    };
-
-    const deletehistory = (name) => {
-      const wasCurrent = name === curname.value;
-      delete session.value[name];
-      delete time.value[name];
-      delete sessionRoles.value[name];
-      delete roleContextStart.value[name];
-      delete visibility.value[name];
-
-      if (pendingConversation.value === name) {
-        pendingConversation.value = null;
-      }
-
-      const remaining = Object.keys(session.value);
-
-      if (wasCurrent) {
-        const fallback = remaining
-          .map((key) => ({ key, updatedAt: time.value[key] ?? 0 }))
-          .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.key;
-
-        if (fallback) {
-          ensureConversation(fallback);
-          curname.value = fallback;
-          return;
+      if (!run.terminal) throw new Error("响应连接中断，请检查保存的回复状态后再操作");
+    } catch (cause) {
+      if (!(cause.name === "AbortError" && run.terminal)) {
+        // Never replay an uncertain request: its user message may already be committed.
+        try {
+          if (run.messageId) {
+            const saved = await api(`/messages/${run.messageId}`);
+            upsertMessage(saved);
+            if (saved.status === "generating") await cancelGeneration();
+          }
+          else {
+            await refreshConversations(); await loadMessages(conversationId);
+            const saved = messagesByConversation.value[conversationId]?.find((item) => item.request_id === run.requestId && item.role === "assistant");
+            if (saved) {
+              run.messageId = saved.id;
+              run.resolveStarted();
+              if (draft && drafts.value[conversationId]?.text === draft.text) drafts.value[conversationId].text = "";
+              if (draft && drafts.value[conversationId]) drafts.value[conversationId].files = drafts.value[conversationId].files.filter((file) => !draft.files.includes(file));
+              if (saved.status === "generating") await cancelGeneration();
+            }
+          }
+        } catch (reconcileError) {
+          reportError(`${cause.message}；状态同步失败：${reconcileError.message}`); throw cause;
         }
-
-        const fallbackName = generateConversationName();
-        createBlankConversation(fallbackName);
-        curname.value = fallbackName;
+        reportError(cause); throw cause;
       }
-    };
-
-    /**
-     * 切换当前会话，必要时自动初始化数据。
-     */
-    const selecthistory = (name) => {
-      if (name && curname.value !== name) {
-        ensureConversation(name);
-        curname.value = name;
-      }
-    };
-
-    /**
-     * 获取当前会话的消息列表，附带虚拟滚动所需的 key。
-     */
-    const getcurmsgs = () => {
-      ensureConversation();
-      const currentMessages = session.value[curname.value];
-
-      return currentMessages.map((item, idx) => ({
-        ...item,
-        attachments: Array.isArray(item.attachments) ? item.attachments : [],
-        _key: `${item.role}-${idx}`,
-      }));
-    };
-
-    /**
-     * 创建新的对话。当存在未使用的占位对话时直接切换过去。
-     */
-    const newchat = () => {
-      if (
-        pendingConversation.value &&
-        session.value[pendingConversation.value] &&
-        (session.value[pendingConversation.value]?.length ?? 0) === 0
-      ) {
-        curname.value = pendingConversation.value;
-        ensureConversation(curname.value, { makeVisibleIfNew: false });
-        return { created: false, name: curname.value };
-      }
-
-      const name = generateConversationName();
-      createBlankConversation(name);
-      curname.value = name;
-      return { created: true, name };
-    };
-
-    /**
-     * 将流式响应追加到最后一条消息中。
-     */
-    const adddelta = (delta) => {
-      ensureConversation();
-      const key = curname.value;
-      const messages = session.value[key];
-      const lastMessage = messages[messages.length - 1];
-
-      if (lastMessage) {
-        lastMessage.content += delta;
-      }
-    };
-
-    /**
-     * 将消息和附件概述拼接成模型可读的输入。
-     */
-    const getMessagesForModel = () => {
-      ensureConversation();
-      const key = curname.value;
-      const contextStart = Math.min(
-        roleContextStart.value[key] ?? 0,
-        session.value[key].length,
-      );
-
-      return session.value[key].slice(contextStart).map((item) => {
-        const attachmentsText =
-          item.attachments && item.attachments.length
-            ? `\n\n附件:\n${item.attachments
-                .map((attachment) => describeAttachment(attachment))
-                .join("\n\n")}`
-            : "";
-
-        const content = `${item.content ?? ""}${attachmentsText}`.trim();
-
-        return {
-          role: item.role,
-          content: content || "(空消息)",
-        };
-      });
-    };
-
-    return {
-      session,
-      curname,
-      sessionpush,
-      getcurmsgs,
-      adddelta,
-      getAllSessions,
-      newchat,
-      clear,
-      deletehistory,
-      selecthistory,
-      time,
-      updateTitle,
-      getMessagesForModel,
-      visibility,
-      pendingConversation,
-      removeMessageAt,
-      trimMessagesFrom,
-      model,
-      modelOptions: MODEL_OPTIONS,
-      setModel,
-      currentRole,
-      setRole,
-      getCurrentRole,
-      sessionRoles,
-      roleContextStart,
-    };
-  },
-  {
-    persist: {
-      afterHydrate: ({ store }) => store.setModel(store.model),
-    },
-  },
-);
+    } finally {
+      run.resolveStarted();
+      if (run.cancellation) await run.cancellation.catch(() => {});
+      if (generation === run) { generation = null; activeGeneration.value = null; }
+    }
+  };
+  const send = async () => {
+    const draft = { text: currentDraft.value.text, files: [...currentDraft.value.files] };
+    if (!draft.text.trim() && !draft.files.length) return;
+    await generate({ draft });
+  };
+  const regenerate = (target) => generate({ target });
+  const deleteMessage = async (item) => {
+    if (activeGeneration.value?.conversationId === item.conversation_id) await cancelGeneration();
+    await api(`/messages/${item.id}`, { method: "DELETE" });
+    messagesByConversation.value[item.conversation_id] = (messagesByConversation.value[item.conversation_id] || []).filter((message) => message.id !== item.id);
+    await loadMessages(item.conversation_id); await refreshConversations();
+  };
+  const deleteConversation = async (id) => {
+    if (activeGeneration.value?.conversationId === id) await cancelGeneration();
+    await api(`/conversations/${id}`, { method: "DELETE" });
+    delete conversations.value[id]; delete messagesByConversation.value[id]; delete drafts.value[id]; delete pages.value[id];
+    if (currentId.value === id) {
+      const next = visibleConversations.value[0]?.id;
+      if (next) await selectConversation(next);
+      else await newConversation();
+    }
+  };
+  const clear = async () => {
+    await cancelGeneration(); await api("/conversations", { method: "DELETE" });
+    conversations.value = {}; messagesByConversation.value = {}; pages.value = {}; drafts.value = {};
+    await newConversation();
+  };
+  const importHistory = async (snapshot) => {
+    const result = await api("/import/local-history", { method: "POST", body: { snapshot } });
+    await refreshConversations(); return result;
+  };
+  const disconnect = () => generation?.controller.abort();
+  return {
+    conversations, currentId, currentConversation, currentRole, currentRoleMeta, messages, visibleConversations,
+    options, configured, keySettingsOpen, ready, loading, error, model, pages, currentDraft, isGenerating, activeGeneration,
+    initialize, reportError, setModel, selectConversation, newConversation, renameConversation, setRole,
+    configureKey, clearKey, setDraftText, addFiles, removeFile, send, regenerate, cancelGeneration,
+    deleteMessage, deleteConversation, clear, importHistory, loadMessages, disconnect,
+  };
+});
