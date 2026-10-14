@@ -1,7 +1,7 @@
 import { ref, computed } from "vue";
 import { defineStore } from "pinia";
-import { AI_ROLES, getRoleById } from "@/utils/aiRoles";
-import { DEEPSEEK_MODES, getDeepSeekMode } from "@/config/deepseekModes";
+import { AI_ROLES, getRoleById } from "../utils/aiRoles.js";
+import { DEEPSEEK_MODES, getDeepSeekMode } from "../config/deepseekModes.js";
 
 // 默认会话名称，用于初始化以及兜底
 const DEFAULT_SESSION_NAME = "新对话";
@@ -116,6 +116,7 @@ export const useSessionStore = defineStore(
       if (pendingConversation.value === key) {
         pendingConversation.value = null;
       }
+      return session.value[key][session.value[key].length - 1];
     };
 
     const setModel = (value) => {

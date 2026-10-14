@@ -1,0 +1,51 @@
+# Place inside Nginx's http context (e.g. /etc/nginx/conf.d/echochat.conf).
+# Render ONLY ${GATEWAY_TOKEN}; preserve Nginx variables such as $host.
+limit_req_zone $binary_remote_addr zone=echochat_requests:10m rate=6r/m;
+limit_conn_zone $binary_remote_addr zone=echochat_connections:10m;
+
+server {
+    listen 80;
+    server_name echochat.example.com;
+    return 301 https://echochat.example.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name echochat.example.com;
+    ssl_certificate /etc/letsencrypt/live/echochat.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/echochat.example.com/privkey.pem;
+    root /srv/echochat/frontend/dist;
+
+    auth_basic "EchoChat";
+    auth_basic_user_file /etc/nginx/echochat.htpasswd;
+    client_max_body_size 256k;
+    client_body_timeout 15s;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy same-origin always;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        limit_req zone=echochat_requests burst=2 nodelay;
+        limit_req_status 429;
+        limit_conn echochat_connections 2;
+        limit_conn_status 429;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        # Overwrite spoofed client credentials. Never expose this value to JS.
+        proxy_set_header X-EchoChat-Gateway-Token "${GATEWAY_TOKEN}";
+        proxy_set_header Authorization "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Forwarded-Proto "";
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_read_timeout 330s;
+        proxy_send_timeout 330s;
+        send_timeout 30s;
+    }
+}

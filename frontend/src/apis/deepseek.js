@@ -1,159 +1,160 @@
-// src/apis/deepseek.js
-import { ElMessage } from "element-plus";
-import { DEEPSEEK_API_KEY } from "@/config/deepseekKey";
-import { getDeepSeekMode } from "@/config/deepseekModes";
+import { SSEParser } from "../utils/sseParser.js";
 
-let currentAbortController = null;
-
-class SSEParser {
-  constructor() {
-    this.buffer = '';
-  }
-
-  parse(chunk) {
-    const lines = [];
-    this.buffer += chunk;
-
-    // 按行分割 buffer
-    const parts = this.buffer.split('\n');
-    
-    // 保留最后一行（可能不完整）
-    this.buffer = parts.pop() || '';
-
-    // 处理完整的行
-    for (const part of parts) {
-      const line = part.trim();
-      if (line.startsWith('data: ')) {
-        lines.push(line);
-      }
-    }
-
-    return lines;
-  }
-
-  getRemainingBuffer() {
-    return this.buffer;
-  }
-
-  clear() {
-    this.buffer = '';
+export class ChatStreamError extends Error {
+  constructor(code, message, { retryable = false, requestId, status } = {}) {
+    super(message);
+    this.name = "ChatStreamError";
+    this.code = code;
+    this.retryable = retryable;
+    this.requestId = requestId;
+    this.status = status;
   }
 }
 
-export async function chatStream(
-  messages,
-  onChunk,
-  onDone,
-  mode = "thinking",
-) {
-  try {
-    const apiKey = (DEEPSEEK_API_KEY ?? "").trim();
-    if (!apiKey) {
-      const errorMsg =
-        "未配置 DeepSeek API Key，请在 .env 中设置 VITE_DEEPSEEK_API_KEY。";
-      ElMessage.error(errorMsg);
-      throw new Error(errorMsg);
-    }
-    
-    currentAbortController = new AbortController();
+// One client per chat view. An older request's finally cannot clear a newer request.
+export function createChatClient({
+  url = "/api/chat/stream",
+  fetchImpl = (...args) => globalThis.fetch(...args),
+  idleTimeoutMs = 75000,
+  totalTimeoutMs = 315000,
+} = {}) {
+  let active = null;
+  const abortStream = () => active?.controller.abort();
 
-    const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-      },
-      body: JSON.stringify({
-        ...getDeepSeekMode(mode).request,
-        messages,
-        stream: true,
-      }),
-      signal: currentAbortController.signal,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMsg = "网络请求失败";
-      try {
-        const errorData = JSON.parse(errorText);
-        errorMsg = errorData.error?.message || errorMsg;
-      } catch {
-        // 如果解析失败，使用原始错误文本
-      }
-      ElMessage.error(errorMsg);
-      throw new Error(errorMsg);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    const sseParser = new SSEParser();
-
-    while (true) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        // 检查剩余 buffer 中是否有未处理的 data 行
-        const remainingBuffer = sseParser.getRemainingBuffer();
-        if (remainingBuffer.trim().startsWith('data: ')) {
-          const lines = sseParser.parse('\n');
-          processLines(lines, onChunk, onDone);
-        }
-        onDone?.();
-        break;
-      }
-
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = sseParser.parse(chunk);
-      
-      const shouldContinue = processLines(lines, onChunk, onDone);
-      if (!shouldContinue) {
-        break;
-      }
-    }
-
-    reader.releaseLock();
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      onDone?.();
-      return;
-    }
-    
-    if (!error.message?.includes('网络请求失败')) {
-      ElMessage.error(error.message || "流式响应处理异常");
-    }
-    
-    throw error;
-  } finally {
-    currentAbortController = null;
-  }
-}
-
-function processLines(lines, onChunk, onDone) {
-  for (const line of lines) {
-    if (line === "data: [DONE]") {
-      onDone?.();
-      return false;
-    }
-
+  async function chatStream(messages, onChunk, onDone, mode = "thinking") {
+    abortStream();
+    const operation = { controller: new AbortController() };
+    active = operation;
+    const { controller } = operation;
+    let reader;
+    let idleTimer;
+    let totalTimer;
+    let outcome = { status: "error" };
+    const timeout = (code, message) =>
+      controller.abort(new ChatStreamError(code, message, { retryable: true }));
+    const resetIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => timeout("idle_timeout", "等待回复超时，请重试。"),
+        idleTimeoutMs,
+      );
+    };
     try {
-      const payload = JSON.parse(line.slice(6));
-
-      const delta = payload.choices?.[0]?.delta?.content;
-      if (delta) {
-        onChunk?.(delta);
+      resetIdle();
+      totalTimer = setTimeout(
+        () => timeout("stream_timeout", "回复超过最大生成时限，请重试。"),
+        totalTimeoutMs,
+      );
+      const response = await fetchImpl(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({ messages, mode }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        let payload;
+        try {
+          payload = await response.json();
+        } catch {
+          /* gateway may return HTML */
+        }
+        const error = payload?.error;
+        throw new ChatStreamError(
+          error?.code || "http_error",
+          error?.message ||
+            (response.status === 401 ? "请先通过站点身份验证。" : "对话服务请求失败。"),
+          {
+            status: response.status,
+            retryable: error?.retryable ?? response.status >= 500,
+            requestId: error?.request_id || response.headers.get("x-request-id"),
+          },
+        );
       }
-    } catch (parseError) {
-      // 跳过 JSON 解析错误，继续处理下一行
-      console.warn('JSON parse error:', parseError, 'Line:', line);
+      if (
+        !response.body ||
+        !response.headers.get("content-type")?.startsWith("text/event-stream")
+      ) {
+        throw new ChatStreamError("invalid_stream", "对话服务未返回事件流。");
+      }
+      reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const decode = (bytes, stream = false) => {
+        try {
+          return decoder.decode(bytes, { stream });
+        } catch {
+          throw new ChatStreamError("invalid_stream", "对话服务返回了无效的文本编码。");
+        }
+      };
+      const parser = new SSEParser();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (controller.signal.aborted) throw controller.signal.reason;
+        if (done) {
+          decode();
+          throw new ChatStreamError("stream_truncated", "回复意外中断，可重新生成。", {
+            retryable: true,
+          });
+        }
+        resetIdle();
+        const events = parser.feed(decode(value, true));
+        for (const item of events) {
+          let payload;
+          try {
+            payload = JSON.parse(item.data);
+          } catch {
+            throw new ChatStreamError("invalid_stream", "对话服务返回了无效的流事件。");
+          }
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            throw new ChatStreamError("invalid_stream", "对话服务返回了无效的流事件。");
+          }
+          if (item.event === "error") {
+            throw new ChatStreamError(
+              payload.code || "server_error",
+              payload.message || "回复生成失败。",
+              { retryable: payload.retryable, requestId: payload.request_id },
+            );
+          }
+          if (item.event === "done") {
+            outcome = { status: "completed", finishReason: payload.finish_reason };
+            return outcome;
+          }
+          if (item.event !== "delta" || typeof payload.content !== "string") {
+            throw new ChatStreamError("invalid_stream", "对话服务返回了未知的流事件。");
+          }
+          if (payload.content) onChunk?.(payload.content);
+        }
+      }
+    } catch (caught) {
+      let error = caught;
+      if (controller.signal.aborted) {
+        if (!(controller.signal.reason instanceof ChatStreamError)) {
+          outcome = { status: "cancelled" };
+          return outcome;
+        }
+        error = controller.signal.reason;
+      } else if (!(error instanceof ChatStreamError) && error instanceof TypeError) {
+        error = new ChatStreamError("network_error", "网络连接失败，请检查网络后重试。", {
+          retryable: true,
+        });
+      }
+      outcome = { status: "error", error };
+      throw error;
+    } finally {
+      clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
+      controller.abort();
+      if (reader) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* aborted or already closed */
+        }
+        reader.releaseLock();
+      }
+      if (active === operation) active = null;
+      onDone?.(outcome);
     }
   }
-  return true;
-}
-
-export function abortStream() {
-  if (currentAbortController) {
-    currentAbortController.abort();
-    currentAbortController = null;
-  }
+  return { chatStream, abortStream };
 }

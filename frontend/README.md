@@ -1,6 +1,6 @@
 # 回韵轻语（EchoChat）
 
-一个基于 Vue 3、Vite 和 DeepSeek Chat API 的多角色 AI 对话应用。
+一个基于 Vue 3、Vite、FastAPI 和 DeepSeek Chat API 的多角色 AI 对话应用。
 
 支持通用助手与程序员助手切换、流式回复、附件上传、语音输入、主题切换和多会话管理。
 
@@ -22,7 +22,7 @@
 回韵轻语围绕“轻量、多会话、多角色”的前端 AI 聊天体验设计，当前主要能力包括：
 
 - 通过按钮在 `通用助手` 和 `程序员助手` 之间切换
-- 在 `deepseek-chat` 与 `deepseek-reasoner` 之间切换模型
+- 在 `thinking` 与 `non-thinking` 之间切换模型模式
 - 流式渲染 AI 输出内容
 - 支持会话新建、重命名、删除、清空、搜索
 - 支持文本、文档和常见代码文件上传
@@ -37,8 +37,8 @@
   - 通用助手：面向日常问答、学习、写作、生活类问题
   - 程序员助手：面向编程、调试、架构、工程实践问题
 - 双模型切换
-  - `deepseek-chat`：更偏快速响应
-  - `deepseek-reasoner`：更适合复杂问题
+  - `non-thinking`：更偏快速响应
+  - `thinking`：更适合复杂问题
 - 流式输出
   - AI 内容按 token 逐步显示
 - 消息操作
@@ -145,7 +145,7 @@
 
 ### 环境要求
 
-- 推荐 `Node.js 20+`
+- 推荐 `Node.js 24 LTS`
 - 推荐 `npm 9+`
 
 说明：
@@ -156,7 +156,7 @@
 ### 1. 安装依赖
 
 ```bash
-npm install
+npm ci
 ```
 
 ### 2. 配置环境变量
@@ -173,10 +173,11 @@ Windows PowerShell 可使用：
 Copy-Item .env.example .env
 ```
 
-然后编辑 `.env`：
+前端无需密钥。仅在后端配置 `DEEPSEEK_API_KEY` 并启动 FastAPI，见[仓库启动说明](../README.md)。
+可选的前端 `.env` 只设置开发代理目标：
 
 ```bash
-VITE_DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxx
+API_PROXY_TARGET=http://127.0.0.1:8000
 ```
 
 ### 3. 启动开发环境
@@ -212,7 +213,7 @@ npm run lint
 
 | 变量名 | 必填 | 说明 |
 | --- | --- | --- |
-| `VITE_DEEPSEEK_API_KEY` | 是 | DeepSeek API Key，用于前端直接请求 `https://api.deepseek.com/v1/chat/completions` |
+| `API_PROXY_TARGET` | 否 | 仅供 Vite 开发代理使用，默认 `http://127.0.0.1:8000`，不包含密钥 |
 
 ## 使用说明
 
@@ -241,12 +242,12 @@ npm run lint
 
 ### 模型说明
 
-#### `deepseek-chat`
+#### `non-thinking`
 
 - 响应更快
 - 适合日常普通对话
 
-#### `deepseek-reasoner`
+#### `thinking`
 
 - 更适合复杂问题
 - 前端仍以普通回复的形式流式展示内容
@@ -299,7 +300,6 @@ vue-llm/
 │   ├── composables/
 │   │   └── useDynamicFavicon.js
 │   ├── config/
-│   │   └── deepseekKey.js
 │   ├── stores/
 │   │   ├── session.js
 │   │   └── theme.js
@@ -395,19 +395,22 @@ vue-llm/
 
 #### `src/apis/deepseek.js`
 
-负责直接请求 DeepSeek 接口：
+负责请求同源 FastAPI 代理：
 
-- 使用 `fetch` 调用 `chat/completions`
-- `stream: true`
-- 手动解析 SSE
-- 暴露 `abortStream()` 供前端停止生成
+- `createChatClient()` 为每个聊天视图创建独立请求生命周期
+- 使用 `fetch` POST `/api/chat/stream`，仅携带消息和模式
+- 解析 `delta`、`done`、`error` SSE 事件；心跳注释刷新空闲时限
+- 取消、空闲/总时限超时后清理定时器和 reader，完成回调仅执行一次
+- UI 保留部分回复；切换会话、角色或卸载时取消请求，防止串写
+- 请求模块抛出带 `code`、`retryable`、`requestId` 的异常，UI 统一提示
 
 #### `src/utils/streamQueue.js`
 
 负责降低高频 token 渲染带来的 UI 压力：
 
 - 把流式 token 先放入队列
-- 使用 `requestAnimationFrame` 合并后再写入状态
+- 使用 `requestAnimationFrame` 合并后再写入目标消息
+- 完成/停止时同步刷出尾部 token；清空/卸载时取消未执行的帧
 
 ### 角色系统
 
@@ -504,18 +507,11 @@ vue-llm/
 
 ## 已知限制
 
-### 1. 当前是纯前端直连 DeepSeek
+### 1. 生产部署依赖鉴权网关
 
-这意味着：
-
-- API Key 会出现在浏览器端环境中
-- 不适合直接作为开放公网产品的最终安全方案
-
-更稳妥的做法是：
-
-- 增加后端代理
-- 在服务端持有真实 API Key
-- 前端只请求自己的后端接口
+API Key 已转移到后端。公开部署必须使用生产模式、站点鉴权、限流和 TLS，
+详见[后端安全说明](../backend/README.md)和 [Nginx 模板](../deploy/nginx.conf.template)。
+应用暂不提供独立用户账号体系。
 
 ### 2. 语音输入依赖浏览器实现
 
@@ -539,7 +535,7 @@ vue-llm/
 
 ## 适合继续扩展的方向
 
-- 接入后端代理，隐藏 API Key
+- 完善独立用户账号、用量配额与共享限流
 - 支持更多模型供应商
 - 支持消息导出
 - 支持代码块运行或沙箱预览

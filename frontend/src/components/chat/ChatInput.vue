@@ -98,7 +98,6 @@ import {
   watch,
 } from "vue";
 
-import { abortStream } from "@/apis/deepseek";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
 
@@ -119,7 +118,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["update:msg", "update:isTyping", "submit"]);
+const emit = defineEmits(["update:msg", "update:isTyping", "submit", "stop"]);
 
 /**
  * 文本输入框的双向绑定代理，直接透传给父组件维护的状态，
@@ -493,8 +492,7 @@ const handleEnter = (event) => {
 };
 
 const stopGeneration = () => {
-  abortStream();
-  isTyping.value = false;
+  emit("stop");
 };
 
 const ensureRecognition = () => {

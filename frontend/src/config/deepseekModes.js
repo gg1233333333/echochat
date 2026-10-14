@@ -2,19 +2,10 @@ export const DEEPSEEK_MODES = Object.freeze([
   {
     label: "推理增强（复杂问题）",
     value: "thinking",
-    request: {
-      model: "deepseek-flash",
-      thinking: { type: "enabled" },
-      reasoning_effort: "high",
-    },
   },
   {
     label: "智能对话（快速响应）",
     value: "non-thinking",
-    request: {
-      model: "deepseek-flash",
-      thinking: { type: "disabled" },
-    },
   },
 ]);
 

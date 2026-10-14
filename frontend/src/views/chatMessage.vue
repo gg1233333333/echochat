@@ -22,8 +22,8 @@ import {
 } from "@element-plus/icons-vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 
-import { chatStream } from "@/apis/deepseek";
-import { createStreamQueue } from "@/utils/streamQueue";
+import { ElMessage } from "element-plus";
+import { useChatGeneration } from "@/composables/useChatGeneration";
 import {
   getAllRoles,
   getRoleById,
@@ -41,10 +41,21 @@ defineOptions({ name: "ChatMessage" });
 
 const sessionStore = useSessionStore();
 const msg = ref("");
-const isTyping = ref(false);
 const showNewMessageIndicator = ref(false);
 
-const streamQueue = createStreamQueue();
+const { isTyping, stopGeneration, runGeneration } = useChatGeneration({
+  sessionStore,
+  getMessages: () => buildMessagesWithSystem(),
+  getMode: () => selectedModel.value,
+  onStart: () => { autoScroll = true; },
+  onSettled: () => { autoScroll = true; },
+  onRendered: () => { void scrollToBottom(); },
+  onFinished: (result) => {
+    showNewMessageIndicator.value = false;
+    if (result.finishReason === "length") ElMessage.warning("回复达到长度限制，可继续提问。");
+  },
+  onError: (error) => ElMessage.error(error.message || "回复生成失败，请重试。"),
+});
 
 const selectedModel = computed({
   get: () => sessionStore.model,
@@ -82,7 +93,7 @@ const md = new MarkdownIt({
       : hljs.highlightAuto(code).value;
     return `<pre><code class="hljs ${validLang ? `language-${lang}` : ""}">${highlighted}</code></pre>`;
   },
-  html: true,
+  html: false,
   linkify: true,
   breaks: true,
   typographer: true,
@@ -169,31 +180,10 @@ const removeChatListeners = () => {
   container.removeEventListener("scroll", handleScroll);
 };
 
-const flushBuffer = () => {
-  streamQueue.clear();
-};
-
-const onDelta = (delta) => {
-  if (!delta) return;
-  streamQueue.enqueueContent(delta);
-};
-
-const handleStreamFinished = () => {
-  isTyping.value = false;
-  showNewMessageIndicator.value = false;
-};
-
 onMounted(async () => {
   addCopyButtons();
   await forceScrollToBottom();
   registerChatListeners();
-  
-  streamQueue.setCallbacks((delta) => {
-    sessionStore.adddelta(delta);
-    requestAnimationFrame(() => {
-      scrollToBottom();
-    });
-  });
 });
 
 onUpdated(() => {
@@ -202,7 +192,6 @@ onUpdated(() => {
 
 onBeforeUnmount(() => {
   removeChatListeners();
-  streamQueue.destroy();
   if (developerWarningTimer) {
     window.clearTimeout(developerWarningTimer);
   }
@@ -239,39 +228,13 @@ const buildMessagesWithSystem = () => {
 
 const submit = async ({ attachments = [] } = {}) => {
   const trimmed = msg.value.trim();
-  if (!trimmed && !attachments.length) return;
-
+  if (isTyping.value || (!trimmed && !attachments.length)) return;
   triggerDeveloperModeWarning(trimmed);
-
-  sessionStore.sessionpush({
-    role: "user",
-    content: trimmed,
-    attachments,
-  });
+  sessionStore.sessionpush({ role: "user", content: trimmed, attachments });
   msg.value = "";
-  await scrollToBottom();
-
-  const aiMessage = { role: "assistant", content: "", attachments: [] };
-  sessionStore.sessionpush(aiMessage);
-  isTyping.value = true;
-  autoScroll = true;
-
-  try {
-    await chatStream(
-      buildMessagesWithSystem(),
-      onDelta,
-      handleStreamFinished,
-      selectedModel.value,
-    );
-  } catch (error) {
-    isTyping.value = false;
-    aiMessage.content = "抱歉，回复生成出错";
-    showNewMessageIndicator.value = false;
-    flushBuffer();
-    console.error(error);
-  } finally {
-    autoScroll = true;
-  }
+  const pending = runGeneration();
+  void scrollToBottom();
+  await pending;
 };
 
 const renderMarkdown = (raw) => md.render(raw || "");
@@ -309,6 +272,7 @@ const copyMessageMarkdown = (text) => {
 };
 
 const handleDeleteMessage = (index) => {
+  if (isTyping.value) stopGeneration();
   sessionStore.removeMessageAt(index);
 };
 
@@ -323,29 +287,8 @@ const handleRegenerateMessage = async (index) => {
 
   sessionStore.trimMessagesFrom(index);
 
-  const aiMessage = { role: "assistant", content: "", attachments: [] };
-  sessionStore.sessionpush(aiMessage);
-  isTyping.value = true;
-  autoScroll = true;
-
-  try {
-    triggerDeveloperModeWarning(userMessageText);
-
-    await chatStream(
-      buildMessagesWithSystem(),
-      onDelta,
-      handleStreamFinished,
-      selectedModel.value,
-    );
-  } catch (error) {
-    isTyping.value = false;
-    aiMessage.content = "抱歉，重新生成时出错";
-    showNewMessageIndicator.value = false;
-    flushBuffer();
-    console.error(error);
-  } finally {
-    autoScroll = true;
-  }
+  triggerDeveloperModeWarning(userMessageText);
+  await runGeneration();
 };
 
 const getAssistantAvatar = (roleId) =>
@@ -407,7 +350,7 @@ const cancelEditing = () => {
 };
 
 const selecthistory = (name) => {
-  flushBuffer();
+  if (isTyping.value) stopGeneration();
   sessionStore.selecthistory(name);
 };
 
@@ -591,7 +534,7 @@ defineExpose({ selecthistory });
     </template>
   </DynamicScroller>
 
-  <ChatInput v-model:msg="msg" v-model:isTyping="isTyping" @submit="submit" />
+  <ChatInput v-model:msg="msg" :isTyping="isTyping" @submit="submit" @stop="stopGeneration" />
 
   <div
     v-if="showNewMessageIndicator"
