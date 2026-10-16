@@ -1,5 +1,5 @@
 import MarkdownIt from "markdown-it";
-import hljs from "highlight.js";
+import { codeHighlighter, isCodeLanguageReady, loadCodeLanguage } from "./codeHighlight.js";
 
 export const markdown = new MarkdownIt({
   html: false,
@@ -8,9 +8,10 @@ export const markdown = new MarkdownIt({
   typographer: true,
   highlight(code, language) {
     // Class names are fixed: user-provided fence labels never become HTML attributes.
-    if (language && hljs.getLanguage(language)) {
-      return `<pre><code class="hljs">${hljs.highlight(code, { language }).value}</code></pre>`;
+    if (language && isCodeLanguageReady(language)) {
+      return `<pre><code class="hljs">${codeHighlighter.highlight(code, { language }).value}</code></pre>`;
     }
+    if (language) void loadCodeLanguage(language);
     return `<pre><code class="hljs">${markdown.utils.escapeHtml(code)}</code></pre>`;
   },
 });

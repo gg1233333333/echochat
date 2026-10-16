@@ -9,10 +9,12 @@ import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import Icons from 'unplugin-icons/vite'
 import IconsResolver from 'unplugin-icons/resolver'
+import { highlightLanguages } from './build/highlightLanguages.js'
 
 
 export default defineConfig({
   plugins: [
+    highlightLanguages(),
     vue(),
     process.env.ECHOCHAT_DEVTOOLS === '1' && vueDevTools(),
     AutoImport({
@@ -46,6 +48,16 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))
+    },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/gsap/')) return 'motion'
+          if (id.includes('/node_modules/element-plus/') || id.includes('/node_modules/@element-plus/')) return 'ui'
+        },
+      },
     },
   },
 })

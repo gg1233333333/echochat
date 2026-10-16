@@ -5,6 +5,10 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 
 import App from "./App.vue";
 import { useThemeStore } from "@/stores/theme";
+import languages from "virtual:highlight-languages";
+import { configureCodeHighlight } from "@/utils/codeHighlight";
+
+configureCodeHighlight(languages);
 
 const app = createApp(App);
 const pinia = createPinia();

@@ -1,5 +1,6 @@
 import { onScopeDispose, shallowRef, watch, watchEffect } from "vue";
 import { renderMarkdown } from "../utils/markdown.js";
+import { highlightRevision } from "../utils/codeHighlight.js";
 
 const FRAME_INTERVAL = 32;
 const MAX_DELAY = 900;
@@ -166,10 +167,11 @@ export function useStreamingDisplay({ messages, currentId, activeGeneration }) {
     visible.value?.id === item.id ? visible.value.reasoning : item.reasoning_content || "";
   const htmlFor = (item) => {
     const text = contentFor(item);
+    const revision = highlightRevision.value;
     const cached = htmlCache.get(item.id);
-    if (cached?.text === text) return cached.html;
+    if (cached?.text === text && cached.revision === revision) return cached.html;
     const html = renderMarkdown(text);
-    htmlCache.set(item.id, { text, html });
+    htmlCache.set(item.id, { text, html, revision });
     return html;
   };
   return {
