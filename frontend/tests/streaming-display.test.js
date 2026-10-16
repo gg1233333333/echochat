@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { effectScope, ref } from "vue";
+import { effectScope, nextTick, ref, watchEffect } from "vue";
 import { useStreamingDisplay } from "../src/composables/useStreamingDisplay.js";
+import { configureCodeHighlight, loadCodeLanguage } from "../src/utils/codeHighlight.js";
 
 function fixture(t) {
   let now = 0;
@@ -233,4 +234,39 @@ test("unfinished code fences render safely, then close into the full highlighted
   for (let i = 0; i < 60; i++) f.step();
   assert.ok(f.display.htmlFor(item).includes("结束。"));
   assert.ok(!f.display.htmlFor(item).includes("<script>"));
+});
+
+test("a loaded grammar refreshes cached history without changing the saved message", async (t) => {
+  const f = fixture(t);
+  let finishDownload;
+  let downloads = 0;
+  configureCodeHighlight({
+    aliases: { py: "python", python: "python" },
+    dependencies: { python: [] },
+    loaders: {
+      python: () => {
+        downloads++;
+        return new Promise((resolve) => {
+          finishDownload = resolve;
+        });
+      },
+    },
+  });
+  const content = '```py\nprint("saved")\n```';
+  f.messages.value = [{ id: "history", conversation_id: "c1", status: "completed", content }];
+  let html;
+  f.scope.run(() =>
+    watchEffect(() => {
+      html = f.display.htmlFor(f.messages.value[0]);
+    }),
+  );
+  assert.doesNotMatch(html, /hljs-built_in/);
+  const python = await import("highlight.js/lib/languages/python");
+  finishDownload(python);
+  await loadCodeLanguage("py");
+  await nextTick();
+  assert.match(html, /hljs-built_in/);
+  assert.equal(f.messages.value[0].content, content);
+  assert.equal(downloads, 1);
+  assert.equal(f.frames.size, 0);
 });
