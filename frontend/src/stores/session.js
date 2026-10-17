@@ -17,7 +17,16 @@ export const useSessionStore = defineStore("chat", () => {
   const currentId = ref(preferences.currentId || null);
   const model = ref(preferences.model || "");
   const agentEnabled = ref(preferences.agentEnabled ?? true);
+  const selectedTools = ref(Array.isArray(preferences.selectedTools) ? preferences.selectedTools : null);
   const options = ref(null);
+  const allowedTools = computed(() => (options.value?.tools || [])
+    .map((tool) => tool.name).filter((name) => selectedTools.value === null || selectedTools.value.includes(name)));
+  const setTool = (name, enabled) => {
+    if (!options.value?.tools?.some((tool) => tool.name === name)) return;
+    const names = new Set(allowedTools.value);
+    if (enabled) names.add(name); else names.delete(name);
+    selectedTools.value = [...names]; remember();
+  };
   const configured = ref(false);
   const keySettingsOpen = ref(false);
   const ready = ref(false);
@@ -41,7 +50,7 @@ export const useSessionStore = defineStore("chat", () => {
     if (!drafts.value[currentId.value]) drafts.value[currentId.value] = { text: "", files: [] };
     return drafts.value[currentId.value];
   });
-  const remember = () => localStorage.setItem(PREFERENCE_KEY, JSON.stringify({ currentId: currentId.value, model: model.value, agentEnabled: agentEnabled.value }));
+  const remember = () => localStorage.setItem(PREFERENCE_KEY, JSON.stringify({ currentId: currentId.value, model: model.value, agentEnabled: agentEnabled.value, selectedTools: selectedTools.value }));
   const toggleAgent = () => { agentEnabled.value = !agentEnabled.value; remember(); };
   const reportError = (value) => { error.value = value?.message || String(value); };
   const setModel = (value) => {
@@ -118,8 +127,8 @@ export const useSessionStore = defineStore("chat", () => {
     catch (cause) { reportError(cause); throw cause; }
     finally { loading.value = false; initialization = null; }
   };
-  const configureKey = async (key) => {
-    configured.value = (await api("/credentials/deepseek", { method: "PUT", body: { api_key: key } })).configured;
+  const configureKey = async (key, target) => {
+    configured.value = (await api("/credentials/deepseek", { method: "PUT", body: { api_key: key, target } })).configured;
   };
   const clearKey = async () => {
     configured.value = (await api("/credentials/deepseek", { method: "DELETE" })).configured;
@@ -168,11 +177,12 @@ export const useSessionStore = defineStore("chat", () => {
     activeGeneration.value = { conversationId, requestId: run.requestId, messageId: null, cancelling: false };
     error.value = "";
     let body;
-    if (target) body = { request_id: run.requestId, mode: model.value, agent_enabled: agentEnabled.value };
+    if (target) body = { request_id: run.requestId, mode: model.value, agent_enabled: agentEnabled.value, allowed_tools: allowedTools.value };
     else {
       body = new FormData();
       body.set("text", draft.text.trim()); body.set("mode", model.value); body.set("request_id", run.requestId);
       body.set("agent_enabled", String(agentEnabled.value));
+      body.set("allowed_tools", JSON.stringify(allowedTools.value));
       draft.files.forEach((file) => body.append("files", file));
     }
     try {
@@ -271,7 +281,7 @@ export const useSessionStore = defineStore("chat", () => {
   return {
     conversations, currentId, currentConversation, currentRole, currentRoleMeta, messages, visibleConversations,
     options, configured, keySettingsOpen, ready, loading, error, model, pages, currentDraft, isGenerating, activeGeneration,
-    initialize, reportError, setModel, agentEnabled, toggleAgent, selectConversation, newConversation, renameConversation, setRole,
+    initialize, reportError, setModel, agentEnabled, toggleAgent, allowedTools, setTool, selectConversation, newConversation, renameConversation, setRole,
     configureKey, clearKey, setDraftText, addFiles, removeFile, send, regenerate, cancelGeneration,
     deleteMessage, deleteConversation, clear, importHistory, loadMessages, disconnect,
   };

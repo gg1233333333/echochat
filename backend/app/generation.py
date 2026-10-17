@@ -10,10 +10,12 @@ from sqlalchemy import delete, select
 
 from app.agent import AgentExecution
 from app.errors import AppError
-from app.models import Attachment, Message, new_id, now
+from app.models import Attachment, Message, Run, new_id, now
 from app.options import ROLES
+from app.providers import ChatCompletionsProvider, ProviderSettings, upstream_error
+from app.runs import RunService, append_event, transition
 from app.service import ChatService, message_data, validate_generation
-from app.tools import ToolRuntime
+from app.tools import TOOL_DEFINITIONS, ToolRuntime
 
 logger = logging.getLogger("echochat.generations")
 logger.setLevel(logging.INFO)
@@ -34,6 +36,7 @@ class Generation:
     conversation_id: str
     message_id: str
     started: dict
+    run_id: str | None = None
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -46,6 +49,8 @@ class GenerationService:
         self.chats = chats
         self.client = client
         self.api_key: str | None = None
+        self.provider_settings = ProviderSettings()
+        self.runs = RunService(chats.db)
         self.active: Generation | None = None
         self.accepted_request_ids: set[str] = set()
 
@@ -98,6 +103,7 @@ class GenerationService:
             else None
         )
         return {
+            "run_id": message.run.id if message.run else None,
             "request_id": message.request_id,
             "conversation_id": message.conversation_id,
             "message": message_data(message),
@@ -115,10 +121,25 @@ class GenerationService:
         attachments: list[dict] | None = None,
         regenerate_id: str | None = None,
         agent_enabled: bool = False,
+        allowed_tools: list[str] | None = None,
     ) -> Generation | dict:
         validate_generation(mode, request_id)
+        if allowed_tools is not None and (
+            not isinstance(allowed_tools, list)
+            or any(
+                not isinstance(name, str) or name not in TOOL_DEFINITIONS for name in allowed_tools
+            )
+        ):
+            raise AppError(422, "TOOL_SCOPE", "工具授权列表包含不支持的工具。")
+        scope = (
+            frozenset(TOOL_DEFINITIONS if allowed_tools is None else allowed_tools)
+            if agent_enabled
+            else frozenset()
+        )
         attachments = attachments or []
         async with self.chats.lock:
+            # Accept destination and credential as one immutable run snapshot.
+            provider_settings, api_key = self.provider_settings, self.api_key
             async with self.chats.db.sessions.begin() as session:
                 existing = await session.scalar(
                     select(Message).where(Message.request_id == request_id)
@@ -137,8 +158,8 @@ class GenerationService:
                     raise AppError(409, "REQUEST_REMOVED", "该请求的消息已删除，请发起新的请求。")
                 if self.active is not None:
                     raise AppError(409, "GENERATION_BUSY", "已有回复正在生成，请先等待或停止。")
-                if not self.api_key:
-                    raise AppError(400, "API_KEY_REQUIRED", "请先在页面配置 DeepSeek API Key。")
+                if not api_key:
+                    raise AppError(400, "API_KEY_REQUIRED", "请先在页面配置模型服务 API Key。")
                 if regenerate_id:
                     target = await self.chats.require_message(session, regenerate_id)
                     if target.role != "assistant" or not target.related_user_message_id:
@@ -226,14 +247,41 @@ class GenerationService:
                 conversation.updated_at = now()
                 session.add(assistant)
                 await session.flush()
+                run_id = new_id()
+                assistant.run = Run(
+                    id=run_id,
+                    request_id=request_id,
+                    message_id=assistant.id,
+                    conversation_id=conversation.id,
+                    state="queued",
+                    last_event_seq=0,
+                    task={
+                        "role": role_id,
+                        "output": "assistant_message",
+                        "mode": mode,
+                        "allowed_tools": sorted(scope),
+                        "provider": provider_settings.data(),
+                    },
+                    checkpoint={
+                        "version": 1,
+                        "message_id": assistant.id,
+                        "model_calls": 0,
+                        "tool_calls": 0,
+                        "resume_supported": False,
+                    },
+                )
+                await session.flush()
+                append_event(session, assistant.run, "run_queued", {})
+                await session.flush()
                 started = {
+                    "run_id": run_id,
                     "request_id": request_id,
                     "conversation_id": conversation.id,
                     "user_message": message_data(user),
                     "assistant_message": message_data(assistant),
                     "conversation": await self.chats.conversation_data(session, conversation),
                 }
-            active = Generation(request_id, conversation.id, assistant.id, started)
+            active = Generation(request_id, conversation.id, assistant.id, started, run_id=run_id)
             self.accepted_request_ids.add(request_id)
             self.active = active
             active.task = asyncio.create_task(
@@ -241,10 +289,12 @@ class GenerationService:
                     active,
                     context,
                     mode,
-                    self.api_key,
+                    api_key,
                     agent_enabled,
                     assistant.context_segment,
                     assistant.seq,
+                    scope,
+                    provider_settings,
                 ),
                 name=f"generation-{request_id}",
             )
@@ -257,6 +307,16 @@ class GenerationService:
             if message is None:
                 return None
             message.content = content
+            checkpoint = changes.pop("checkpoint", None)
+            if active.run_id:
+                run = await self.runs.require(session, active.run_id)
+                if checkpoint is not None:
+                    run.checkpoint = copy.deepcopy(checkpoint)
+                run.updated_at = now()
+                if "status" in changes:
+                    run.error_code = changes.get("error_code")
+                    run.error_message = changes.get("error_message")
+                    transition(session, run, changes["status"], error_code=run.error_code)
             for key, value in changes.items():
                 setattr(message, key, copy.deepcopy(value) if key == "agent_steps" else value)
             await session.flush()
@@ -267,6 +327,7 @@ class GenerationService:
         async with self.chats.db.sessions() as session:
             conversation = await self.chats.require_conversation(session, active.conversation_id)
             return {
+                "run_id": active.run_id,
                 "request_id": active.request_id,
                 "conversation_id": active.conversation_id,
                 "message": message,
@@ -282,6 +343,8 @@ class GenerationService:
         agent_enabled: bool,
         segment: str,
         seq: int,
+        scope: frozenset[str],
+        provider_settings: ProviderSettings,
     ):
         active.ready.set()
         started = time.monotonic()
@@ -292,6 +355,7 @@ class GenerationService:
                 (
                     kind,
                     {
+                        "run_id": active.run_id,
                         "request_id": active.request_id,
                         "conversation_id": active.conversation_id,
                         "message_id": active.message_id,
@@ -301,20 +365,35 @@ class GenerationService:
             )
 
         async def save(content, **changes):
-            return await self.persist(active, content, **changes)
+            return await self.persist(active, content, checkpoint=execution.checkpoint(), **changes)
+
+        async def event(kind, payload):
+            item = await self.runs.record(
+                active.run_id, kind, payload, checkpoint=execution.checkpoint()
+            )
+            await emit("run", item)
 
         execution = AgentExecution(
             ToolRuntime(
-                self.chats.db, self.client, active.conversation_id, active.message_id, segment, seq
+                self.chats.db,
+                self.client,
+                active.conversation_id,
+                active.message_id,
+                segment,
+                seq,
+                scope,
             ),
             emit,
             save,
-            self.upstream_error,
+            ChatCompletionsProvider(self.client, provider_settings),
             mode,
             api_key,
             agent_enabled,
+            event=event,
         )
         try:
+            async with self.chats.db.sessions.begin() as session:
+                transition(session, await self.runs.require(session, active.run_id), "running")
             await execution.run(context)
         except asyncio.CancelledError:
             status = "cancelled"
@@ -353,6 +432,7 @@ class GenerationService:
                 execution.content,
                 reasoning_content=execution.reasoning,
                 agent_steps=execution.steps,
+                checkpoint=execution.checkpoint(),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
@@ -398,28 +478,7 @@ class GenerationService:
             active.done.set()
             await active.queue.put(None)
 
-    @staticmethod
-    def upstream_error(response: httpx.Response):
-        mapping = {
-            401: ("INVALID_API_KEY", "API Key 无效，请重新配置。"),
-            402: ("INSUFFICIENT_BALANCE", "DeepSeek 账户余额不足。"),
-            429: ("UPSTREAM_RATE_LIMIT", "模型服务请求过于频繁，请稍后重试。"),
-            503: ("UPSTREAM_UNAVAILABLE", "模型服务暂不可用，请稍后重试。"),
-        }
-        if response.status_code == 400:
-            try:
-                error = response.json().get("error", {})
-                description = str(error.get("code", "")) + str(error.get("message", ""))
-                if "context" in description.lower() or "token" in description.lower():
-                    return AppError(
-                        400, "CONTEXT_TOO_LONG", "当前上下文超过模型限制，请开启新对话。"
-                    )
-            except (ValueError, AttributeError):
-                pass
-        code, message = mapping.get(
-            response.status_code, ("UPSTREAM_REJECTED", "模型服务拒绝了请求，请稍后重试。")
-        )
-        return AppError(502, code, message)
+    upstream_error = staticmethod(upstream_error)
 
     async def stream(self, generation: Generation | dict):
         if isinstance(generation, dict):

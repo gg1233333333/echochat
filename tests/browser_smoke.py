@@ -77,9 +77,9 @@ def run():
 
         # Credential is configured in the page and never persisted in browser storage.
         settings_command("API Key 设置")
-        page.get_by_placeholder("输入 DeepSeek API Key").fill(TEST_KEY)
+        page.get_by_placeholder("输入模型服务 API Key").fill(TEST_KEY)
         page.get_by_role("button", name="使用密钥", exact=True).click()
-        expect(page.get_by_placeholder("输入 DeepSeek API Key")).to_have_value("")
+        expect(page.get_by_placeholder("输入模型服务 API Key")).to_have_value("")
         page.keyboard.press("Escape")
         expect(page.get_by_role("dialog")).not_to_be_visible()
         assert api("GET", "/credentials/deepseek") == {"configured": True}
@@ -326,6 +326,7 @@ def run():
         settings_command("API Key 设置")
         page.get_by_role("button", name="清除密钥", exact=True).click()
         assert api("GET", "/credentials/deepseek") == {"configured": False}
+        expect(page.get_by_role("dialog").get_by_role("button", name="Close this dialog")).to_be_visible()
         page.keyboard.press("Escape")
         expect(page.get_by_role("dialog")).not_to_be_visible()
         page.screenshot(path=str(RESULTS / "desktop.png"), full_page=True, animations="disabled")

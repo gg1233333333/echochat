@@ -161,7 +161,7 @@ def check_key_dialog(page, width):
     trigger.click()
     dialog = page.get_by_role("dialog", name="API Key 设置", exact=True)
     expect(dialog).to_be_visible()
-    key_input = page.get_by_placeholder("输入 DeepSeek API Key")
+    key_input = page.get_by_placeholder("输入模型服务 API Key")
     key_input.fill(TEST_KEY)
     expect(key_input).to_have_attribute("type", "password")
     background = dialog.locator(".el-dialog").evaluate(

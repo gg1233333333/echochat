@@ -24,9 +24,11 @@ from app.database import Database
 from app.errors import AppError
 from app.generation import GenerationService
 from app.legacy import LegacyError, normalize_legacy_snapshot
-from app.models import Artifact
+from app.models import AppSetting, Artifact
 from app.options import MODES, ROLES
+from app.providers import ChatCompletionsProvider, ProviderSettings
 from app.service import ChatService
+from app.tools import TOOL_DEFINITIONS
 
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 
@@ -121,6 +123,14 @@ class Regenerate(BaseModel):
     request_id: str
     mode: str
     agent_enabled: bool = False
+    allowed_tools: list[str] | None = None
+
+
+class ConfigureProvider(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    base_url: str
+    model: str
+    protocol: str
 
 
 class ImportHistory(BaseModel):
@@ -148,6 +158,10 @@ def create_app(
             chats = ChatService(database)
             await chats.initialize_titles()
             generations = GenerationService(chats, client)
+            async with database.sessions() as session:
+                saved = await session.get(AppSetting, "provider")
+                if saved:
+                    generations.provider_settings = ProviderSettings(**saved.value)
             chats.generations = generations
             app.state.chats = chats
             app.state.generations = generations
@@ -190,7 +204,57 @@ def create_app(
             ],
             "modes": [{"value": key, "label": value["label"]} for key, value in MODES.items()],
             "attachments": ATTACHMENT_LIMITS,
+            "tools": [
+                {"name": name, "label": value[1], "description": value[2]}
+                for name, value in TOOL_DEFINITIONS.items()
+            ],
         }
+
+    @application.get("/api/provider")
+    async def get_provider(request: Request):
+        return request.app.state.generations.provider_settings.data()
+
+    @application.put("/api/provider")
+    async def configure_provider(request: Request, data: ConfigureProvider):
+        settings = ProviderSettings(**data.model_dump())
+        generations = request.app.state.generations
+        async with generations.chats.lock:
+            if generations.active:
+                raise AppError(409, "GENERATION_BUSY", "请先停止当前运行再修改模型服务。")
+            previous = generations.provider_settings
+            async with generations.chats.db.sessions.begin() as session:
+                await session.merge(AppSetting(key="provider", value=settings.data()))
+            generations.provider_settings = settings
+            if (previous.base_url, previous.protocol) != (settings.base_url, settings.protocol):
+                generations.api_key = None
+        return {**settings.data(), "configured": bool(generations.api_key)}
+
+    @application.post("/api/provider/test")
+    async def test_provider(request: Request):
+        generations = request.app.state.generations
+        return await ChatCompletionsProvider(
+            generations.client, generations.provider_settings
+        ).test_connection(generations.api_key)
+
+    @application.get("/api/runs/{run_id}")
+    async def get_run(request: Request, run_id: str):
+        return await request.app.state.generations.runs.read(run_id)
+
+    @application.post("/api/runs/{run_id}/cancel")
+    async def cancel_run(request: Request, run_id: str):
+        generations = request.app.state.generations
+        run = await generations.runs.read(run_id)
+        await generations.cancel(run["request_id"])
+        return await generations.runs.read(run_id)
+
+    @application.get("/api/runs/{run_id}/events")
+    async def run_events(
+        request: Request,
+        run_id: str,
+        after_seq: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ):
+        return await request.app.state.generations.runs.events(run_id, after_seq, limit)
 
     @application.get("/api/credentials/deepseek")
     async def get_credential(request: Request):
@@ -210,7 +274,21 @@ def create_app(
             or any(ord(char) < 33 or ord(char) > 126 for char in key.strip())
         ):
             raise AppError(422, "INVALID_KEY", "请提供有效的 API Key。")
-        request.app.state.generations.api_key = key.strip()
+        generations = request.app.state.generations
+        async with generations.chats.lock:
+            settings = generations.provider_settings
+            target = data.get("target")
+            expected = {"base_url": settings.base_url, "protocol": settings.protocol}
+            default = ProviderSettings()
+            legacy = target is None and expected == {
+                "base_url": default.base_url, "protocol": default.protocol
+            }
+            if not legacy and target != expected:
+                raise AppError(
+                    409, "CREDENTIAL_TARGET_CHANGED",
+                    "模型服务已更改，请重新打开密钥设置并核对目标地址。",
+                )
+            generations.api_key = key.strip()
         return {"configured": True}
 
     @application.delete("/api/credentials/deepseek")
@@ -296,7 +374,12 @@ def create_app(
         request_id: Annotated[str, Form()] = "",
         files: Annotated[list[UploadFile] | None, File()] = None,
         agent_enabled: Annotated[bool, Form()] = False,
+        allowed_tools: Annotated[str | None, Form()] = None,
     ):
+        try:
+            scope = json.loads(allowed_tools) if allowed_tools is not None else None
+        except ValueError:
+            raise AppError(422, "TOOL_SCOPE", "工具授权列表格式无效。") from None
         uploads, total = [], 0
         try:
             if len(files or []) > MAX_FILES:
@@ -323,6 +406,7 @@ def create_app(
             text=text,
             attachments=attachments,
             agent_enabled=agent_enabled,
+            allowed_tools=scope,
         )
         return response_for(generations, generation)
 
@@ -334,6 +418,7 @@ def create_app(
             mode=data.mode,
             regenerate_id=message_id,
             agent_enabled=data.agent_enabled,
+            allowed_tools=data.allowed_tools,
         )
         return response_for(generations, generation)
 

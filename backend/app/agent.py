@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from hashlib import sha256
 from typing import TypedDict
 
 import httpx
@@ -9,10 +10,8 @@ from langgraph.graph import END, START, StateGraph
 from langsmith import tracing_context
 
 from app.errors import AppError
-from app.options import MODES
 from app.tools import TOOL_DEFINITIONS, ToolError, ToolRuntime, tool_schemas
 
-UPSTREAM_URL = "https://api.deepseek.com/v1/chat/completions"
 MAX_ROUNDS = 6
 MAX_CALLS = 12
 logger = logging.getLogger("echochat.generations")
@@ -69,15 +68,35 @@ class AgentState(TypedDict):
 
 
 class AgentExecution:
-    def __init__(self, runtime: ToolRuntime, emit, save, upstream_error, mode, api_key, enabled):
+    def __init__(
+        self, runtime: ToolRuntime, emit, save, provider, mode, api_key, enabled, event=None
+    ):
         self.runtime, self.emit, self.save = runtime, emit, save
-        self.upstream_error = upstream_error
-        self.mode, self.api_key, self.enabled = mode, api_key, enabled
+        self.provider, self.on_event = provider, event
+        self.model_calls, self.tool_attempts = 0, 0
+        self.mode, self.api_key, self.enabled = (
+            mode,
+            api_key,
+            bool(enabled and runtime.allowed_tools),
+        )
         self.content = ""
         self.reasoning = ""
         self.steps = []
         self.finish_reason = None
         self.last_saved = time.monotonic()
+
+    async def event(self, kind, payload):
+        if self.on_event:
+            await self.on_event(kind, payload)
+
+    def checkpoint(self):
+        return {
+            "version": 1,
+            "message_id": self.runtime.message_id,
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_attempts,
+            "resume_supported": False,
+        }
 
     async def snapshot(self):
         await self.save(self.content, reasoning_content=self.reasoning, agent_steps=self.steps)
@@ -100,88 +119,59 @@ class AgentExecution:
                 for message in state["messages"]
             ]
         )
-        payload = {
-            "model": "deepseek-flash",
-            "messages": messages,
-            "stream": True,
-            **MODES[self.mode]["request"],
-        }
-        if self.enabled:
-            payload.update(tools=tool_schemas(), tool_choice="auto")
         answer, reasoning, calls = "", "", {}
         finish = None
-        async with self.runtime.client.stream(
-            "POST",
-            UPSTREAM_URL,
-            json=payload,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-        ) as response:
-            if response.is_error:
-                await response.aread()
-                raise self.upstream_error(response)
-            lines = []
-            async for line in response.aiter_lines():
-                if line.startswith("data:"):
-                    lines.append(line[5:].lstrip())
-                    continue
-                if line or not lines:
-                    continue
-                data, lines = "\n".join(lines), []
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                    if "error" in chunk:
-                        raise AppError(502, "UPSTREAM_ERROR", "模型服务在生成期间返回错误。")
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
-                    text, thought = delta.get("content"), delta.get("reasoning_content")
-                    if any(
-                        value is not None and not isinstance(value, str)
-                        for value in (text, thought)
+        self.model_calls += 1
+        await self.event("model_started", {"round": self.model_calls})
+        async for choice in self.provider.choices(
+            messages,
+            self.mode,
+            tool_schemas(self.runtime.allowed_tools) if self.enabled else [],
+            self.api_key,
+        ):
+            try:
+                delta = choice.get("delta", {})
+                text, thought = delta.get("content"), delta.get("reasoning_content")
+                if any(
+                    value is not None and not isinstance(value, str) for value in (text, thought)
+                ):
+                    raise ValueError()
+                text, thought = text or "", thought or ""
+                answer += text
+                reasoning += thought
+                self.content += text
+                self.reasoning += thought
+                if len(self.content) + len(self.reasoning) > 500000:
+                    raise AppError(502, "OUTPUT_LIMIT", "本次输出超过长度限制，已停止。")
+                if text or thought:
+                    await self.emit("delta", {"content": text, "reasoning_content": thought})
+                for fragment in delta.get("tool_calls") or []:
+                    index = fragment["index"]
+                    if type(index) is not int or not 0 <= index < MAX_CALLS:
+                        raise ValueError()
+                    call = calls.setdefault(
+                        index,
+                        {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    call["id"] += fragment.get("id") or ""
+                    function = fragment.get("function") or {}
+                    call["function"]["name"] += function.get("name") or ""
+                    call["function"]["arguments"] += function.get("arguments") or ""
+                    if (
+                        len(call["id"]) > 200
+                        or len(call["function"]["name"]) > 100
+                        or len(call["function"]["arguments"]) > 100000
                     ):
                         raise ValueError()
-                    text, thought = text or "", thought or ""
-                    answer += text
-                    reasoning += thought
-                    self.content += text
-                    self.reasoning += thought
-                    if len(self.content) + len(self.reasoning) > 500000:
-                        raise AppError(502, "OUTPUT_LIMIT", "本次输出超过长度限制，已停止。")
-                    if text or thought:
-                        await self.emit("delta", {"content": text, "reasoning_content": thought})
-                    for fragment in delta.get("tool_calls") or []:
-                        index = fragment["index"]
-                        if type(index) is not int or not 0 <= index < MAX_CALLS:
-                            raise ValueError()
-                        call = calls.setdefault(
-                            index,
-                            {
-                                "id": "",
-                                "type": "function",
-                                "function": {"name": "", "arguments": ""},
-                            },
-                        )
-                        call["id"] += fragment.get("id") or ""
-                        function = fragment.get("function") or {}
-                        call["function"]["name"] += function.get("name") or ""
-                        call["function"]["arguments"] += function.get("arguments") or ""
-                        if (
-                            len(call["id"]) > 200
-                            or len(call["function"]["name"]) > 100
-                            or len(call["function"]["arguments"]) > 100000
-                        ):
-                            raise ValueError()
-                    finish = choice.get("finish_reason") or finish
-                except (ValueError, TypeError, KeyError, AttributeError):
-                    raise AppError(
-                        502, "INVALID_UPSTREAM_STREAM", "模型返回了无效的数据流。"
-                    ) from None
-                if time.monotonic() - self.last_saved >= 1:
-                    await self.snapshot()
+                finish = choice.get("finish_reason") or finish
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise AppError(502, "INVALID_UPSTREAM_STREAM", "模型返回了无效的数据流。") from None
+            if time.monotonic() - self.last_saved >= 1:
+                await self.snapshot()
         self.finish_reason = finish
         if not finish:
             raise AppError(502, "UPSTREAM_DISCONNECTED", "模型连接在完成前中断，请重新生成。")
@@ -206,6 +196,7 @@ class AgentExecution:
         )
         if ordered:
             await self.report_tools()
+        await self.event("model_finished", {"round": self.model_calls, "finish_reason": finish})
         return {
             "messages": [*state["messages"], assistant],
             "calls": ordered,
@@ -219,8 +210,15 @@ class AgentExecution:
             raise AppError(422, "AGENT_LIMIT", "已达到本次任务的模型轮次上限，已停止调用工具。")
         messages = list(state["messages"])
         for call, record in zip(state["calls"], self.steps[-1]["tools"], strict=True):
+            self.tool_attempts += 1
+            self.runtime.operation_id = sha256(
+                f"{self.runtime.message_id}:{state['rounds']}:{call['id']}".encode()
+            ).hexdigest()
             record["status"] = "running"
             await self.report_tools()
+            await self.event(
+                "tool_started", {"name": call["function"]["name"], "call_id": call["id"]}
+            )
             try:
                 async with asyncio.timeout(20):
                     result = await self.runtime.execute(
@@ -241,6 +239,14 @@ class AgentExecution:
                     status="failed", result={"error": "工具执行失败，请稍后重试或调整参数。"}
                 )
             await self.report_tools()
+            await self.event(
+                "tool_finished",
+                {
+                    "name": call["function"]["name"],
+                    "call_id": call["id"],
+                    "status": record["status"],
+                },
+            )
             messages.append(
                 {
                     "role": "tool",

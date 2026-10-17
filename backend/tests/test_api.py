@@ -152,7 +152,7 @@ async def test_generation_persistence_idempotency_modes_and_error(client):
     assert result[-1]["message"]["status"] == "completed"
     assert result[-1]["message"]["content"] == "answer"
     assert result[-1]["message"]["reasoning_content"] == "先理解问题，再给出回答。"
-    deltas = [item for item in result if "message_id" in item]
+    deltas = [item for item in result if "reasoning_content" in item]
     assert "".join(item["reasoning_content"] for item in deltas) == "先理解问题，再给出回答。"
     assert "".join(item["content"] for item in deltas) == "answer"
     history = (await client.get(f"/api/conversations/{conversation['id']}/messages")).json()[

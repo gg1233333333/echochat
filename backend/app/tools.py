@@ -15,6 +15,7 @@ import httpx
 from ddgs import DDGS
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert
 
 from app.database import Database
 from app.models import Artifact, Attachment, Message, new_id
@@ -84,7 +85,7 @@ TOOL_DEFINITIONS = {
 }
 
 
-def tool_schemas():
+def tool_schemas(allowed=None):
     return [
         {
             "type": "function",
@@ -95,6 +96,7 @@ def tool_schemas():
             },
         }
         for name, (schema, _, description) in TOOL_DEFINITIONS.items()
+        if allowed is None or name in allowed
     ]
 
 
@@ -299,6 +301,8 @@ class ToolRuntime:
     message_id: str
     segment: str
     through_seq: int
+    allowed_tools: frozenset[str] | None = None
+    operation_id: str | None = None
 
     def attachments_query(self):
         return (
@@ -312,6 +316,8 @@ class ToolRuntime:
         )
 
     async def execute(self, name: str, arguments: str) -> dict:
+        if self.allowed_tools is not None and name not in self.allowed_tools:
+            raise ToolError("此工具未获本次运行授权，已拒绝执行。")
         if name not in TOOL_DEFINITIONS:
             raise ToolError("不支持的工具。")
         try:
@@ -361,15 +367,41 @@ class ToolRuntime:
             mime = {"md": "text/markdown", "txt": "text/plain", "json": "application/json"}[
                 args.format
             ]
-            artifact = Artifact(
-                id=new_id(), message_id=self.message_id, name=name, mime=mime, content=args.content
-            )
+            artifact_id = new_id()
             async with self.db.sessions.begin() as session:
-                session.add(artifact)
+                await session.execute(
+                    insert(Artifact)
+                    .values(
+                        id=artifact_id,
+                        message_id=self.message_id,
+                        name=name,
+                        mime=mime,
+                        content=args.content,
+                        operation_id=self.operation_id,
+                    )
+                    .on_conflict_do_nothing(index_elements=["operation_id"])
+                )
+                row = (
+                    await session.execute(
+                        select(
+                            Artifact.id,
+                            Artifact.name,
+                            Artifact.content,
+                            Artifact.message_id,
+                        ).where(
+                            Artifact.operation_id == self.operation_id
+                            if self.operation_id
+                            else Artifact.id == artifact_id
+                        )
+                    )
+                ).one()
+                if (row.name, row.content, row.message_id) != (name, args.content, self.message_id):
+                    raise ToolError("同一工具操作标识的文件参数不一致，已拒绝重复创建。")
+                artifact_id = row.id
             return {
-                "artifact_id": artifact.id,
+                "artifact_id": artifact_id,
                 "name": name,
-                "download_url": f"/api/artifacts/{artifact.id}/download",
+                "download_url": f"/api/artifacts/{artifact_id}/download",
             }
         if isinstance(args, SearchWeb):
             return await asyncio.to_thread(search_web, args.query)

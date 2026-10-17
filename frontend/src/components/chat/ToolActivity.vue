@@ -1,8 +1,10 @@
 <script setup>
 import { computed } from "vue";
+import RunDetails from "./RunDetails.vue";
 import { ArrowRight, Connection, Download } from "@element-plus/icons-vue";
 
 const props = defineProps({
+  runId: { type: String, default: null },
   calls: { type: Array, default: () => [] },
   artifacts: { type: Array, default: () => [] },
 });
@@ -20,7 +22,8 @@ const preview = (value) => {
 </script>
 
 <template>
-  <div v-if="calls.length || artifacts.length" class="tool-activity">
+  <div v-if="calls.length || artifacts.length || runId" class="tool-activity">
+    <RunDetails v-if="runId" :run-id="runId" />
     <details v-if="calls.length" class="tool-details" @toggle="emit('resize')">
       <summary>
         <el-icon class="tool-chevron"><ArrowRight /></el-icon>

@@ -2,7 +2,9 @@
 import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { Setting, Key, Upload, Delete, RefreshRight } from "@element-plus/icons-vue";
+import ProviderSettings from "./ProviderSettings.vue";
 import { useSessionStore } from "@/stores/session";
+import { api } from "@/apis/backend";
 
 const store = useSessionStore();
 defineProps({ compact: Boolean, historyBusy: Boolean });
@@ -14,7 +16,10 @@ const keyDialog = computed({
   },
 });
 const importDialog = ref(false);
+const providerDialog = ref(false);
 const apiKey = ref("");
+const keyTarget = ref(null);
+let keyTargetRevision = 0;
 const busy = ref(false);
 const keyAction = ref("");
 const keyError = ref("");
@@ -22,8 +27,19 @@ const importError = ref("");
 const importResult = ref("");
 const importFile = ref(null);
 const hasLegacy = ref(!!localStorage.getItem("session"));
-watch(keyDialog, (open) => {
-  if (open) keyError.value = "";
+watch(keyDialog, async (open) => {
+  const revision = ++keyTargetRevision;
+  keyTarget.value = null;
+  if (!open) return;
+  keyError.value = "";
+  try {
+    const target = await api("/provider");
+    if (revision === keyTargetRevision && keyDialog.value) {
+      keyTarget.value = { base_url: target.base_url, protocol: target.protocol };
+    }
+  } catch (error) {
+    if (revision === keyTargetRevision && keyDialog.value) keyError.value = error.message;
+  }
 });
 watch(importDialog, (open) => {
   if (open) {
@@ -34,17 +50,18 @@ watch(importDialog, (open) => {
 const settingsCommand = (command) => {
   if (busy.value) return;
   if (command === "key") keyDialog.value = true;
+  else if (command === "provider") providerDialog.value = true;
   else if (command === "import" && !store.isGenerating) importDialog.value = true;
   else if (command === "clear") emit("clear-history");
   else if (command === "opening" && !store.isGenerating) emit("replay-opening");
 };
 const useKey = async () => {
-  if (!apiKey.value.trim() || busy.value) return;
+  if (!apiKey.value.trim() || busy.value || !keyTarget.value) return;
   busy.value = true;
   keyAction.value = "save";
   keyError.value = "";
   try {
-    await store.configureKey(apiKey.value.trim());
+    await store.configureKey(apiKey.value.trim(), { ...keyTarget.value });
     apiKey.value = "";
     keyDialog.value = false;
     ElMessage.success("密钥已保存");
@@ -150,6 +167,7 @@ const exportLegacy = () => {
           <el-dropdown-item command="key" :icon="Key"
             >API Key 设置 · {{ store.configured ? "已保存" : "未配置" }}</el-dropdown-item
           >
+          <el-dropdown-item command="provider" :icon="Setting" :disabled="store.isGenerating">模型接口</el-dropdown-item>
           <el-dropdown-item command="import" :icon="Upload" :disabled="store.isGenerating"
             >导入旧记录</el-dropdown-item
           >
@@ -171,6 +189,7 @@ const exportLegacy = () => {
       >
     </el-dropdown>
   </div>
+  <ProviderSettings v-model="providerDialog" />
   <el-dialog
     v-model="keyDialog"
     title="API Key 设置"
@@ -185,14 +204,15 @@ const exportLegacy = () => {
     <p class="settings-note">
       密钥仅保存在本次后端运行内存中，刷新页面仍可使用；清除或重启后端后需重新填写。
     </p>
+    <p class="settings-note key-target">{{ keyTarget ? `密钥目标：${keyTarget.base_url}（${keyTarget.protocol}）` : "正在读取模型服务地址…" }}</p>
     <el-input
       v-model="apiKey"
       type="password"
       show-password
       autocomplete="off"
       :disabled="busy"
-      placeholder="输入 DeepSeek API Key"
-      aria-label="DeepSeek API Key"
+      placeholder="输入模型服务 API Key"
+      aria-label="模型服务 API Key"
       @keyup.enter="useKey"
     />
     <p class="settings-status">
@@ -216,7 +236,7 @@ const exportLegacy = () => {
       <el-button
         type="primary"
         :loading="keyAction === 'save'"
-        :disabled="!apiKey.trim() || busy"
+        :disabled="!apiKey.trim() || busy || !keyTarget"
         @click="useKey"
         >{{ store.configured ? "更换密钥" : "使用密钥" }}</el-button
       >
@@ -335,6 +355,9 @@ const exportLegacy = () => {
 .key-shortcut:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.key-target {
+  overflow-wrap: anywhere;
 }
 .settings-note {
   font-size: 13px;
