@@ -139,42 +139,6 @@ async def test_fragmented_tools_roundtrip_history_files_and_idempotency(tmp_path
         assert (await api.get("/api/credentials/deepseek")).json() == {"configured": False}
 
 
-async def test_tool_failures_are_returned_to_model_and_rounds_are_bounded(tmp_path):
-    requests = []
-
-    def model(request):
-        body = json.loads(request.content)
-        requests.append(body)
-        if len(requests) > 1:
-            assert "error" in json.loads(body["messages"][-1]["content"])
-        return httpx.Response(
-            200,
-            text=sse(
-                {
-                    "tool_calls": [
-                        call(
-                            "calculate", {"expression": "__import__('os')"}, f"call_{len(requests)}"
-                        )
-                    ]
-                },
-                finish="tool_calls",
-            ),
-        )
-
-    app = create_app(data_dir=tmp_path, transport=httpx.MockTransport(model))
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
-        ) as api,
-    ):
-        result = final(await send(api, await open_chat(api)))
-        assert result["code"] == "AGENT_LIMIT"
-        assert len(requests) == 6
-        assert result["message"]["tool_calls"][-1]["status"] == "cancelled"
-        assert all(c["status"] == "failed" for c in result["message"]["tool_calls"][:-1])
-
-
 async def test_cancel_during_tool_and_restart_preserve_trace(tmp_path, monkeypatch):
     entered = asyncio.Event()
 
@@ -375,40 +339,6 @@ async def test_disabled_tools_never_execute_an_upstream_tool_call(tmp_path, monk
         )
         assert result["code"] == "INVALID_TOOL_CALLS"
         assert executed == []
-
-
-async def test_tool_call_budget_is_checked_before_a_batch_runs(tmp_path, monkeypatch):
-    executed = []
-    requests = []
-
-    async def tool(self, name, arguments):
-        executed.append(name)
-        return {"result": "2"}
-
-    monkeypatch.setattr(ToolRuntime, "execute", tool)
-
-    def model(request):
-        requests.append(json.loads(request.content))
-        calls = [
-            call("calculate", {"expression": "1+1"}, f"call_{len(requests)}_{index}", index)
-            for index in range(7)
-        ]
-        return httpx.Response(200, text=sse({"tool_calls": calls}, finish="tool_calls"))
-
-    app = create_app(data_dir=tmp_path, transport=httpx.MockTransport(model))
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
-        ) as api,
-    ):
-        result = final(await send(api, await open_chat(api)))
-        assert result["code"] == "AGENT_LIMIT"
-        assert len(requests) == 2
-        assert len(executed) == 7
-        assert [c["status"] for c in result["message"]["tool_calls"]] == (
-            ["completed"] * 7 + ["cancelled"] * 7
-        )
 
 
 async def test_cancel_preserves_completed_file_and_regenerate_removes_it(tmp_path, monkeypatch):

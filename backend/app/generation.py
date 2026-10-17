@@ -410,8 +410,8 @@ class GenerationService:
         except TimeoutError:
             status, error_code, error_message = (
                 "failed",
-                "AGENT_TIMEOUT",
-                "任务超过 5 分钟，已停止。",
+                "UPSTREAM_TIMEOUT",
+                "单次模型请求超时，请重试。",
             )
         except Exception as error:
             logger.error(

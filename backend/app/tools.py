@@ -56,7 +56,12 @@ class ReadWebpage(Arguments):
 
 
 TOOL_DEFINITIONS = {
-    "calculate": (Calculate, "精确计算", "计算算术表达式，支持 + - * / % ** 和括号，不执行代码。"),
+    "calculate": (
+        Calculate,
+        "精确计算",
+        "计算单个算术表达式，支持 + - * / % ** 和括号，例如 (10 + 5) * 2 或 0.1 + 0.2；"
+        "不接受元组、逗号分隔的多个表达式，不执行代码。",
+    ),
     "list_attachments": (
         ListAttachments,
         "查找附件",
@@ -205,24 +210,46 @@ async def public_address(host: str, port: int) -> str:
 
 
 class PageText(HTMLParser):
+    HIDDEN = {"script", "style", "noscript", "template", "svg", "nav", "header", "footer", "aside"}
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "wbr"}
+
     def __init__(self):
         super().__init__()
-        self.hidden = 0
-        self.parts = []
+        self.stack = []
+        self.parts = {name: [] for name in ("main", "article", "body", "document")}
+
+    def append(self, text):
+        if any(tag in self.HIDDEN for tag in self.stack):
+            return
+        self.parts["document"].append(text)
+        for name in ("main", "article", "body"):
+            if name in self.stack:
+                self.parts[name].append(text)
 
     def handle_starttag(self, tag, attrs):
-        if tag in {"script", "style", "noscript", "template", "svg"}:
-            self.hidden += 1
-        if not self.hidden and tag in {"p", "div", "br", "li", "h1", "h2", "h3", "tr"}:
-            self.parts.append("\n")
+        if tag not in self.VOID:
+            self.stack.append(tag)
+        if tag in {"p", "div", "br", "li", "h1", "h2", "h3", "tr"}:
+            self.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        if tag == "br":
+            self.append("\n")
 
     def handle_endtag(self, tag):
-        if tag in {"script", "style", "noscript", "template", "svg"} and self.hidden:
-            self.hidden -= 1
+        if tag in self.stack:
+            index = len(self.stack) - 1 - self.stack[::-1].index(tag)
+            del self.stack[index:]
 
     def handle_data(self, data):
-        if not self.hidden:
-            self.parts.append(data)
+        self.append(data)
+
+    def extract(self):
+        for scope, parts in self.parts.items():
+            text = " ".join(parts).strip()
+            if text:
+                return text, scope
+        return "", "document"
 
 
 async def read_public_page(url: str, client: httpx.AsyncClient) -> dict:
@@ -260,14 +287,26 @@ async def read_public_page(url: str, client: httpx.AsyncClient) -> dict:
                 if len(content) > 1024 * 1024:
                     raise ToolError("网页超过 1 MiB 读取限制。")
             text = bytes(content).decode(response.encoding or "utf-8", errors="replace")
+            scope = "document"
             if "html" in mime:
                 parser = PageText()
                 parser.feed(text)
-                text = " ".join(parser.parts)
+                text, scope = parser.extract()
             text = re.sub(r"[ \t]+", " ", text).strip()
             if not text:
                 raise ToolError("网页未返回可提取文字，可能需要登录或执行脚本。")
-            return {"url": url, "text": text[:12000], "truncated": len(text) > 12000}
+            truncated = len(text) > 12000
+            return {
+                "url": url,
+                "text": text[:12000],
+                "truncated": truncated,
+                "coverage": f"{scope}: "
+                + (
+                    "first 12000 characters; remaining text omitted"
+                    if truncated
+                    else "extracted text; scripts/navigation and other page sections may be omitted"
+                ),
+            }
     raise ToolError("网页重定向次数超过限制。")
 
 
