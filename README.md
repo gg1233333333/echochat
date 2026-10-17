@@ -38,6 +38,16 @@ npm run dev
 
 ## 数据与聊天行为
 
+输入区的“工具”开关启用 Agent 能力，默认开启；关闭后按普通聊天处理。后端使用 LangGraph 编排“模型 → 工具 → 模型”循环，复用原有流式输出、停止生成和历史记录。
+
+- 可调用的工具：精确算术、列出和读取当前对话附件、生成可下载的 Markdown / TXT / JSON 文件、免 Key 网页搜索和公开网页文字读取。
+- 回复中的“工具记录”默认折叠，可查看参数、结果与成功或失败状态；文件下载入口独立展示，刷新后仍然可用。删除所属回复或对话会同时删除文件。
+- 附件读取范围限定在当前对话上下文已提交的附件；网页读取禁止本机、内网和保留地址，逐次校验重定向，不登录、不执行网页脚本。搜索关键词会发送到 DuckDuckGo，勿输入密钥或隐私资料。
+- 每次任务最多 6 轮模型请求、12 次工具调用，单工具最多 20 秒、总任务最多 5 分钟。工具失败会回传给模型，并在记录中保留；停止后保留已完成的结果。
+- 搜索无需额外 Key，可能因网络或限流失败；动态网页、登录页面可能无法提取文字。附件仍采用下述提取上限，生成文件每个最多 80000 字符。
+- 网页域名解析遇到 Clash 的 `198.18.0.0/15` 虚拟地址时，使用 Cloudflare 公共 DNS 查询该域名，再校验并连接公网地址；不会放行代理虚拟地址或其他内网地址。
+- 执行记录与产物保存在原 SQLite 数据库，无需安装额外数据库。服务重启会把未完成任务标为中断，不自动重新执行。未接入后台调度、任意代码执行或多用户权限。LangSmith 外部追踪默认禁用。
+
 - 聊天记录保存在 `backend/data/echochat.db`，启动时自动执行 Alembic 数据迁移。数据库和本地密钥不进入 Git。
 - 会话使用独立 ID，可以同名；空白会话在首次发送后才进入历史列表。
 - 同时只能生成一个回复。切换会话后，回复仍保存到原会话；停止会保留已经生成的内容。
@@ -107,6 +117,7 @@ uv run --project backend --with playwright python tests/browser_smoke.py
 uv run --project backend --with playwright python tests/browser_layout.py
 uv run --project backend --with playwright python tests/browser_opening.py
 uv run --project backend --with playwright python tests/browser_streaming.py
+uv run --project backend --with playwright python tests/browser_agent.py
 ```
 
 Windows 默认使用已安装的 Edge；其他系统需要 Playwright Chromium。模拟测试验证应用行为，真实 DeepSeek 连通性需要在页面填写有效密钥验证。

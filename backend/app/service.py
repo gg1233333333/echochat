@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import protocol_messages, tool_calls_data
 from app.database import Database
 from app.errors import AppError
 from app.models import Attachment, Conversation, Message, new_id, now
@@ -38,6 +39,11 @@ def message_data(message: Message) -> dict:
     return {
         **{field: getattr(message, field) for field in fields},
         "attachments": [attachment_data(item) for item in message.attachments],
+        "tool_calls": tool_calls_data(message.agent_steps or []),
+        "artifacts": [
+            {"id": item.id, "name": item.name, "download_url": f"/api/artifacts/{item.id}/download"}
+            for item in message.artifacts
+        ],
     }
 
 
@@ -316,6 +322,29 @@ class ChatService:
         messages = (await session.scalars(query.order_by(Message.seq))).all()
         result = [{"role": "system", "content": ROLES[role_id]["system_prompt"]}]
         for message in messages:
+            if message.role == "assistant" and message.agent_steps:
+                protocol = protocol_messages(message.agent_steps)
+                result.extend(protocol)
+                received = "".join(
+                    item.get("content", "") for item in protocol if item["role"] == "assistant"
+                )
+                received_reasoning = "".join(
+                    item.get("reasoning_content", "")
+                    for item in protocol
+                    if item["role"] == "assistant"
+                )
+                # A stop or disconnect can retain a partial model round after the last tool result.
+                if message.content.startswith(received) and len(message.content) > len(received):
+                    result.append(
+                        {
+                            "role": "assistant",
+                            "content": message.content[len(received) :],
+                            "reasoning_content": message.reasoning_content[
+                                len(received_reasoning) :
+                            ],
+                        }
+                    )
+                continue
             content = message.content
             for attachment in message.attachments:
                 content += (
@@ -323,5 +352,8 @@ class ChatService:
                     f"{attachment.extracted_text or attachment.note or '无可提取正文'}"
                 )
             if content.strip():
-                result.append({"role": message.role, "content": content})
+                entry = {"role": message.role, "content": content}
+                if message.role == "assistant":
+                    entry["reasoning_content"] = message.reasoning_content
+                result.append(entry)
         return result

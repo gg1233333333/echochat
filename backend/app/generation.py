@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -7,10 +8,12 @@ from dataclasses import dataclass, field
 import httpx
 from sqlalchemy import delete, select
 
+from app.agent import AgentExecution
 from app.errors import AppError
 from app.models import Attachment, Message, new_id, now
-from app.options import MODES, ROLES
+from app.options import ROLES
 from app.service import ChatService, message_data, validate_generation
+from app.tools import ToolRuntime
 
 logger = logging.getLogger("echochat.generations")
 logger.setLevel(logging.INFO)
@@ -19,7 +22,6 @@ if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     logger.addHandler(handler)
-UPSTREAM_URL = "https://api.deepseek.com/v1/chat/completions"
 
 
 def encode_event(event: str, data: dict) -> str:
@@ -112,6 +114,7 @@ class GenerationService:
         text: str = "",
         attachments: list[dict] | None = None,
         regenerate_id: str | None = None,
+        agent_enabled: bool = False,
     ) -> Generation | dict:
         validate_generation(mode, request_id)
         attachments = attachments or []
@@ -194,6 +197,7 @@ class GenerationService:
                         mode=mode,
                         status="completed",
                         attachments=[Attachment(**item) for item in attachments],
+                        artifacts=[],
                     )
                     conversation.next_seq += 1
                     session.add(user)
@@ -215,6 +219,8 @@ class GenerationService:
                     regenerated_from_id=regenerate_id,
                     status="generating",
                     attachments=[],
+                    artifacts=[],
+                    agent_steps=[],
                 )
                 conversation.next_seq += 1
                 conversation.updated_at = now()
@@ -231,7 +237,16 @@ class GenerationService:
             self.accepted_request_ids.add(request_id)
             self.active = active
             active.task = asyncio.create_task(
-                self.run(active, context, mode, self.api_key), name=f"generation-{request_id}"
+                self.run(
+                    active,
+                    context,
+                    mode,
+                    self.api_key,
+                    agent_enabled,
+                    assistant.context_segment,
+                    assistant.seq,
+                ),
+                name=f"generation-{request_id}",
             )
             await active.ready.wait()
             return active
@@ -243,7 +258,7 @@ class GenerationService:
                 return None
             message.content = content
             for key, value in changes.items():
-                setattr(message, key, value)
+                setattr(message, key, copy.deepcopy(value) if key == "agent_steps" else value)
             await session.flush()
             return message_data(message)
 
@@ -258,82 +273,49 @@ class GenerationService:
                 "conversation": await self.chats.conversation_data(session, conversation),
             }
 
-    async def run(self, active: Generation, context: list[dict], mode: str, api_key: str):
+    async def run(
+        self,
+        active: Generation,
+        context: list[dict],
+        mode: str,
+        api_key: str,
+        agent_enabled: bool,
+        segment: str,
+        seq: int,
+    ):
         active.ready.set()
-        content = ""
-        reasoning_content = ""
-        finish_reason = None
         started = time.monotonic()
-        last_saved = started
         status, error_code, error_message = "completed", None, None
+
+        async def emit(kind, data):
+            await active.queue.put(
+                (
+                    kind,
+                    {
+                        "request_id": active.request_id,
+                        "conversation_id": active.conversation_id,
+                        "message_id": active.message_id,
+                        **data,
+                    },
+                )
+            )
+
+        async def save(content, **changes):
+            return await self.persist(active, content, **changes)
+
+        execution = AgentExecution(
+            ToolRuntime(
+                self.chats.db, self.client, active.conversation_id, active.message_id, segment, seq
+            ),
+            emit,
+            save,
+            self.upstream_error,
+            mode,
+            api_key,
+            agent_enabled,
+        )
         try:
-            payload = {"model": "deepseek-flash", "messages": context, "stream": True}
-            payload.update(MODES[mode]["request"])
-            async with self.client.stream(
-                "POST",
-                UPSTREAM_URL,
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            ) as response:
-                if response.is_error:
-                    await response.aread()
-                    raise self.upstream_error(response)
-                data_lines = []
-                async for line in response.aiter_lines():
-                    if line.startswith("data:"):
-                        data_lines.append(line[5:].lstrip())
-                    elif not line and data_lines:
-                        data = "\n".join(data_lines)
-                        data_lines = []
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                        except json.JSONDecodeError:
-                            raise AppError(
-                                502, "INVALID_UPSTREAM_STREAM", "模型返回了无效的数据流。"
-                            ) from None
-                        if "error" in chunk:
-                            raise AppError(502, "UPSTREAM_ERROR", "模型服务在生成期间返回错误。")
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        delta = choice.get("delta", {})
-                        answer_delta = delta.get("content")
-                        reasoning_delta = delta.get("reasoning_content")
-                        if any(
-                            value is not None and not isinstance(value, str)
-                            for value in (answer_delta, reasoning_delta)
-                        ):
-                            raise AppError(502, "INVALID_UPSTREAM_STREAM", "模型返回了无效的正文。")
-                        answer_delta = answer_delta or ""
-                        reasoning_delta = reasoning_delta or ""
-                        if answer_delta or reasoning_delta:
-                            content += answer_delta
-                            reasoning_content += reasoning_delta
-                            await active.queue.put(
-                                (
-                                    "delta",
-                                    {
-                                        "request_id": active.request_id,
-                                        "conversation_id": active.conversation_id,
-                                        "message_id": active.message_id,
-                                        "content": answer_delta,
-                                        "reasoning_content": reasoning_delta,
-                                    },
-                                )
-                            )
-                        finish_reason = choice.get("finish_reason") or finish_reason
-                        if time.monotonic() - last_saved >= 1:
-                            await self.persist(active, content, reasoning_content=reasoning_content)
-                            last_saved = time.monotonic()
-                if not finish_reason:
-                    raise AppError(
-                        502, "UPSTREAM_DISCONNECTED", "模型连接在完成前中断，请重新生成。"
-                    )
-                if finish_reason in ("aborted", "insufficient_system_resource", "content_filter"):
-                    raise AppError(502, "UPSTREAM_INCOMPLETE", "模型未能完成回复，请查看完成原因。")
+            await execution.run(context)
         except asyncio.CancelledError:
             status = "cancelled"
         except AppError as error:
@@ -346,6 +328,12 @@ class GenerationService:
             )
         except httpx.HTTPError:
             status, error_code, error_message = "failed", "UPSTREAM_NETWORK", "无法连接模型服务。"
+        except TimeoutError:
+            status, error_code, error_message = (
+                "failed",
+                "AGENT_TIMEOUT",
+                "任务超过 5 分钟，已停止。",
+            )
         except Exception as error:
             logger.error(
                 "generation failed request_id=%s exception=%s",
@@ -358,15 +346,17 @@ class GenerationService:
                 "生成失败，请稍后重试。",
             )
         active.finishing = True
+        execution.interrupt_tools()
         try:
             final = await self.final_data(
                 active,
-                content,
-                reasoning_content=reasoning_content,
+                execution.content,
+                reasoning_content=execution.reasoning,
+                agent_steps=execution.steps,
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
-                finish_reason=finish_reason,
+                finish_reason=execution.finish_reason,
             )
             if status == "failed":
                 await active.queue.put(

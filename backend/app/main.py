@@ -3,13 +3,14 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
 from app.attachments import (
     ATTACHMENT_LIMITS,
@@ -23,6 +24,7 @@ from app.database import Database
 from app.errors import AppError
 from app.generation import GenerationService
 from app.legacy import LegacyError, normalize_legacy_snapshot
+from app.models import Artifact
 from app.options import MODES, ROLES
 from app.service import ChatService
 
@@ -118,6 +120,7 @@ class Regenerate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: str
     mode: str
+    agent_enabled: bool = False
 
 
 class ImportHistory(BaseModel):
@@ -255,6 +258,27 @@ def create_app(
     async def get_message(request: Request, message_id: str):
         return await request.app.state.chats.get_message(message_id)
 
+    @application.get("/api/artifacts/{artifact_id}/download")
+    async def download_artifact(request: Request, artifact_id: str):
+        async with request.app.state.chats.db.sessions() as session:
+            row = (
+                await session.execute(
+                    select(Artifact.name, Artifact.content).where(Artifact.id == artifact_id)
+                )
+            ).first()
+            if row is None:
+                raise AppError(404, "ARTIFACT_NOT_FOUND", "文件不存在或所属对话已删除。")
+            return Response(
+                row.content.encode("utf-8"),
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition": "attachment; filename*=UTF-8''"
+                    + quote(row.name, safe=""),
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "no-store",
+                },
+            )
+
     @application.delete("/api/messages/{message_id}", status_code=204)
     async def delete_message(request: Request, message_id: str):
         await request.app.state.chats.delete_message(message_id)
@@ -271,6 +295,7 @@ def create_app(
         mode: Annotated[str, Form()] = "thinking",
         request_id: Annotated[str, Form()] = "",
         files: Annotated[list[UploadFile] | None, File()] = None,
+        agent_enabled: Annotated[bool, Form()] = False,
     ):
         uploads, total = [], 0
         try:
@@ -297,6 +322,7 @@ def create_app(
             conversation_id=conversation_id,
             text=text,
             attachments=attachments,
+            agent_enabled=agent_enabled,
         )
         return response_for(generations, generation)
 
@@ -307,6 +333,7 @@ def create_app(
             request_id=data.request_id,
             mode=data.mode,
             regenerate_id=message_id,
+            agent_enabled=data.agent_enabled,
         )
         return response_for(generations, generation)
 
