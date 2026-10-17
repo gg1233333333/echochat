@@ -441,7 +441,7 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
                   </div>
                 </div>
                 <ToolActivity v-if="item.role === 'assistant'" :calls="item.tool_calls"
-                  :artifacts="item.artifacts" @resize="onToolLayout(item.id)" />
+                  :artifacts="item.artifacts" :run-id="item.run_id" @resize="onToolLayout(item.id)" />
                 <div v-if="pending(item) && !item.tool_calls?.length" class="pending-state">
                   <span>{{ item.reasoning_content ? "等待回答" : "等待回复" }}</span
                   ><span class="pending-state__dots" aria-hidden="true"

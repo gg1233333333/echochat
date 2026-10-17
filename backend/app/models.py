@@ -69,6 +69,51 @@ class Message(Base):
         cascade="all, delete-orphan", passive_deletes=True, lazy="selectin"
     )
 
+    run: Mapped["Run | None"] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+        foreign_keys="Run.message_id",
+    )
+
+
+class Run(Base):
+    __tablename__ = "runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    request_id: Mapped[str | None] = mapped_column(String(36), unique=True)
+    message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), unique=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    state: Mapped[str] = mapped_column(String(20), default="queued")
+    task: Mapped[dict] = mapped_column(JSON)
+    checkpoint: Mapped[dict] = mapped_column(JSON)
+    last_event_seq: Mapped[int] = mapped_column(default=0, server_default="0")
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class RunEvent(Base):
+    __tablename__ = "run_events"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
+    seq: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON)
+
 
 class Artifact(Base):
     __tablename__ = "artifacts"
@@ -78,6 +123,7 @@ class Artifact(Base):
         ForeignKey("messages.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(120))
+    operation_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     mime: Mapped[str] = mapped_column(String(100))
     content: Mapped[str] = mapped_column(Text, deferred=True)
 

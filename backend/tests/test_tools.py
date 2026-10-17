@@ -131,3 +131,57 @@ async def test_dns_rejects_a_mixed_public_and_private_answer(monkeypatch):
     monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
     with pytest.raises(ToolError):
         await public_address("example.com", 443)
+
+
+@pytest.mark.parametrize(
+    "scope,html,expected",
+    [
+        (
+            "main",
+            "<body><nav>menu</nav><article>other</article><main>primary</main></body>",
+            "primary",
+        ),
+        ("article", "<body><nav>menu</nav><article>primary</article>other</body>", "primary"),
+        (
+            "body",
+            "<body><header>menu</header><p>primary</p><footer>footer</footer></body>",
+            "primary",
+        ),
+    ],
+)
+async def test_web_reader_prefers_body_content_over_navigation(monkeypatch, scope, html, expected):
+    async def resolve(*args):
+        return "93.184.216.34"
+
+    monkeypatch.setattr("app.tools.public_address", resolve)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                text=html,
+                headers={"Content-Type": "text/html"},
+            )
+        )
+    ) as client:
+        result = await read_public_page("https://example.com/", client)
+    assert result["text"] == expected
+    assert result["coverage"].startswith(scope + ":") and not result["truncated"]
+
+
+async def test_web_reader_explicitly_marks_truncated_main_text(monkeypatch):
+    async def resolve(*args):
+        return "93.184.216.34"
+
+    monkeypatch.setattr("app.tools.public_address", resolve)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                text="<main>" + "x" * 13000 + "</main>",
+                headers={"Content-Type": "text/html"},
+            )
+        )
+    ) as client:
+        result = await read_public_page("https://example.com/", client)
+    assert len(result["text"]) == 12000 and result["truncated"]
+    assert "remaining text omitted" in result["coverage"]

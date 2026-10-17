@@ -8,15 +8,16 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 async function fixture(t, rejection, { selectInitial = true } = {}) {
-  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { getItem: () => null, setItem: () => {} } });
+  const preferences = new Map();
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { getItem: (key) => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value) } });
   setActivePinia(createPinia());
-  let controller, requestId, cancelled = false, heldLoad, heldCreation;
+  let controller, requestId, cancelled = false, heldLoad, heldCreation, sentBody;
   let saved = [];
   const conversation = (id, count = 0) => ({ id, title: id, current_role_id: "general", context_segment: "segment", message_count: count, preview: "", updated_at: "2026-10-13T00:00:00Z" });
   const user = () => ({ id: "user-1", conversation_id: "c1", seq: 1, role: "user", content: "问题", status: "completed", request_id: requestId, attachments: [] });
   const assistant = (status = "generating", content = "", reasoning_content = "") => ({ id: "answer-1", conversation_id: "c1", seq: 2, role: "assistant", content, reasoning_content, status, request_id: requestId, attachments: [] });
   t.mock.method(globalThis, "fetch", async (path, init = {}) => {
-    if (path === "/api/options") return json({ roles: [{ id: "general" }], modes: [{ value: "thinking" }], attachments: {} });
+    if (path === "/api/options") return json({ roles: [{ id: "general" }], modes: [{ value: "thinking" }], attachments: {}, tools: [{ name: "calculate" }, { name: "create_file" }] });
     if (path === "/api/credentials/deepseek") return json({ configured: true });
     if (path === "/api/conversations?include_empty=true") return json({ items: [conversation("c1", saved.length), conversation("c2")] });
     if (path === "/api/conversations" && init.method === "POST") {
@@ -31,6 +32,7 @@ async function fixture(t, rejection, { selectInitial = true } = {}) {
     }
     if (path === "/api/conversations/c1/messages") {
       if (rejection) return json({ detail: { code: "invalid_file", message: "文件损坏" } }, 400);
+      sentBody = init.body;
       requestId = init.body.get("request_id");
       return new Response(new ReadableStream({ start(streamController) {
         controller = streamController;
@@ -51,7 +53,7 @@ async function fixture(t, rejection, { selectInitial = true } = {}) {
   store.setDraftText("问题");
   const emit = (type, payload) => controller.enqueue(new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify({ request_id: requestId, conversation_id: "c1", ...payload })}\n\n`));
   return {
-    store, emit, get cancelled() { return cancelled; },
+    store, emit, get sentBody() { return sentBody; }, get cancelled() { return cancelled; },
     start() { saved = [user(), assistant()]; emit("started", { user_message: user(), assistant_message: assistant(), conversation: conversation("c1", 2) }); },
     finish(reasoning = "") { saved = [user(), assistant("completed", "最终回复", reasoning)]; emit("done", { message: saved[1], conversation: conversation("c1", 2) }); controller.close(); },
     disconnect() { controller.close(); },
@@ -236,4 +238,34 @@ test("a delayed new conversation is saved without replacing a later selection or
   assert.equal(f.store.currentDraft.text, "");
   await f.store.selectConversation("c2");
   assert.equal(f.store.currentDraft.text, "后续选择的草稿");
+});
+
+
+test("individual tool permissions persist and are included in the accepted request snapshot", async (t) => {
+  const f = await fixture(t);
+  assert.deepEqual(f.store.allowedTools, ["calculate", "create_file"]);
+  f.store.setTool("create_file", false);
+  f.store.setTool("unknown", true);
+  assert.deepEqual(f.store.allowedTools, ["calculate"]);
+  assert.deepEqual(JSON.parse(localStorage.getItem("echochat.preferences")).selectedTools, ["calculate"]);
+  const pending = f.store.send();
+  await tick(); f.start(); await tick();
+  assert.deepEqual(JSON.parse(f.sentBody.get("allowed_tools")), ["calculate"]);
+  f.store.setTool("create_file", true);
+  assert.deepEqual(JSON.parse(f.sentBody.get("allowed_tools")), ["calculate"]);
+  f.finish(); await pending;
+});
+
+
+test("key submission keeps the target observed by the dialog", async (t) => {
+  const f = await fixture(t);
+  let submitted;
+  t.mock.method(globalThis, "fetch", async (path, init) => {
+    assert.equal(path, "/api/credentials/deepseek");
+    submitted = JSON.parse(init.body);
+    return json({ configured: true });
+  });
+  const observed = { base_url: "https://observed.example/v1", protocol: "openai" };
+  await f.store.configureKey("fake-key", observed);
+  assert.deepEqual(submitted, { api_key: "fake-key", target: observed });
 });

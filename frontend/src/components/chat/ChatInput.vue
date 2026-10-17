@@ -7,6 +7,7 @@ import { useSpeechInput } from "@/composables/useSpeechInput";
 
 const emit = defineEmits(["submit"]);
 const store = useSessionStore();
+const toolPermissionsOpen = ref(false);
 const textarea = ref(null);
 const composerColumn = ref(null);
 const composerExtras = ref(null);
@@ -205,13 +206,23 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
           </p>
         </div>
         <div class="toolbar">
-          <el-tooltip content="允许 AI 读取本对话附件、计算、生成文件和联网检索。搜索关键词会发给搜索引擎。" placement="top">
-            <button class="toolbar-btn agent-toggle" :class="{ enabled: store.agentEnabled }"
-              type="button" aria-label="允许使用工具" :aria-pressed="store.agentEnabled"
-              :disabled="!store.ready || store.isGenerating" @click="store.toggleAgent">
-              <el-icon><Connection /></el-icon><span>工具</span>
-            </button>
-          </el-tooltip>
+          <el-popover v-model:visible="toolPermissionsOpen" trigger="click" placement="top-start" :width="280" :persistent="false" popper-class="tool-permissions-popover">
+            <template #reference>
+              <button class="toolbar-btn agent-toggle" :class="{ enabled: store.agentEnabled && store.allowedTools.length }"
+                type="button" aria-label="允许使用工具" :aria-pressed="store.agentEnabled" :aria-expanded="toolPermissionsOpen"
+                :disabled="!store.ready || store.isGenerating">
+                <el-icon><Connection /></el-icon><span>工具</span>
+              </button>
+            </template>
+            <div class="tool-permissions">
+              <el-checkbox :model-value="store.agentEnabled" :disabled="store.isGenerating" @change="store.toggleAgent">允许使用工具</el-checkbox>
+              <p>只对下一次发送生效。联网搜索会向搜索引擎发送关键词。</p>
+              <el-checkbox v-for="tool in store.options?.tools || []" :key="tool.name"
+                :model-value="store.allowedTools.includes(tool.name)" :disabled="!store.agentEnabled || store.isGenerating"
+                @change="(enabled) => store.setTool(tool.name, enabled)">{{ tool.label }}</el-checkbox>
+              <el-button text @click="toolPermissionsOpen = false">完成</el-button>
+            </div>
+          </el-popover>
           <el-tooltip content="上传文件" placement="top"
             ><button
               class="toolbar-btn"
@@ -290,6 +301,9 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 </template>
 
 <style scoped>
+.tool-permissions { display: flex; flex-direction: column; max-height: min(420px, 60vh); overflow: auto; }
+.tool-permissions p { color: var(--color-text-secondary); font-size: 12px; line-height: 1.5; margin: 4px 0 8px; }
+.tool-permissions .el-checkbox { margin-right: 0; min-height: 36px; }
 .container {
   flex-shrink: 0;
   min-width: 0;

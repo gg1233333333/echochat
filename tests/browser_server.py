@@ -62,6 +62,8 @@ requests: list[dict] = []
 
 
 async def fake_model(request: httpx.Request) -> httpx.Response:
+    if request.method == "GET" and request.url.path.endswith("/models"):
+        return httpx.Response(200, json={"data": [{"id": "test-model"}]})
     body = json.loads(request.content)
     requests.append(body)
     if request.headers.get("authorization") != "Bearer echochat-browser-test-key":

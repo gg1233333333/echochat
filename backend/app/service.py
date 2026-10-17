@@ -38,6 +38,7 @@ def message_data(message: Message) -> dict:
     )
     return {
         **{field: getattr(message, field) for field in fields},
+        "run_id": message.run.id if message.role == "assistant" and message.run else None,
         "attachments": [attachment_data(item) for item in message.attachments],
         "tool_calls": tool_calls_data(message.agent_steps or []),
         "artifacts": [

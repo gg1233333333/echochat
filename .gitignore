@@ -14,3 +14,4 @@ __pycache__/
 backend/data/
 .mypy_cache/
 test-results/
+.agent-workflow/

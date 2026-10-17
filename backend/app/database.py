@@ -7,7 +7,8 @@ from alembic.config import Config
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.models import Message
+from app.models import Message, Run
+from app.runs import transition
 
 
 class Database:
@@ -44,6 +45,12 @@ class Database:
                         if tool["status"] in {"pending", "running"}:
                             tool.update(status="interrupted", result={"error": "服务已重启。"})
                 message.agent_steps = steps
+            for run in await session.scalars(
+                select(Run).where(Run.state.in_(["queued", "running"]))
+            ):
+                run.error_code = "SERVER_RESTARTED"
+                run.error_message = "服务已重启，上次运行已中断；不会自动续跑。"
+                transition(session, run, "interrupted", error_code=run.error_code)
 
     async def close(self):
         await self.engine.dispose()
