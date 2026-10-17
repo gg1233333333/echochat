@@ -115,6 +115,27 @@ test("pre-stream validation keeps unsent text and files", async (t) => {
   assert.equal(f.store.isGenerating, false);
 });
 
+test("tool events stay with their generation and ignore stale or stopped updates", async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.store.agentEnabled, true);
+  f.store.toggleAgent();
+  assert.equal(f.store.agentEnabled, false);
+  const sending = f.store.send();
+  await tick(); f.start(); await tick();
+  const calls = [{ id: "tool-1", label: "精确计算", status: "running" }];
+  f.emit("tools", { message_id: "wrong-message", tool_calls: calls });
+  await tick();
+  assert.equal(f.store.messages[1].tool_calls, undefined);
+  await f.store.selectConversation("c2");
+  f.emit("tools", { message_id: "answer-1", tool_calls: calls });
+  await tick();
+  assert.equal(f.store.messages.length, 0);
+  await f.store.selectConversation("c1");
+  assert.deepEqual(f.store.messages[1].tool_calls, calls);
+  f.finish(); await sending;
+  assert.equal(f.store.messages[1].tool_calls, undefined);
+});
+
 test("a newly selected conversation draft stays reactive for the send button", async (t) => {
   const f = await fixture(t);
   await f.store.newConversation();

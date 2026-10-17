@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -48,6 +48,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(12))
     content: Mapped[str] = mapped_column(Text, default="")
     reasoning_content: Mapped[str] = mapped_column(Text, default="", server_default="")
+    agent_steps: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     role_id: Mapped[str | None] = mapped_column(String(30))
     context_segment: Mapped[str | None] = mapped_column(String(36))
     mode: Mapped[str | None] = mapped_column(String(30))
@@ -64,6 +65,21 @@ class Message(Base):
     attachments: Mapped[list["Attachment"]] = relationship(
         cascade="all, delete-orphan", passive_deletes=True, lazy="selectin"
     )
+    artifacts: Mapped[list["Artifact"]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True, lazy="selectin"
+    )
+
+
+class Artifact(Base):
+    __tablename__ = "artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    mime: Mapped[str] = mapped_column(String(100))
+    content: Mapped[str] = mapped_column(Text, deferred=True)
 
 
 class Attachment(Base):

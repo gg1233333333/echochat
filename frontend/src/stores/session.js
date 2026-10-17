@@ -16,6 +16,7 @@ export const useSessionStore = defineStore("chat", () => {
   const drafts = ref({});
   const currentId = ref(preferences.currentId || null);
   const model = ref(preferences.model || "");
+  const agentEnabled = ref(preferences.agentEnabled ?? true);
   const options = ref(null);
   const configured = ref(false);
   const keySettingsOpen = ref(false);
@@ -40,7 +41,8 @@ export const useSessionStore = defineStore("chat", () => {
     if (!drafts.value[currentId.value]) drafts.value[currentId.value] = { text: "", files: [] };
     return drafts.value[currentId.value];
   });
-  const remember = () => localStorage.setItem(PREFERENCE_KEY, JSON.stringify({ currentId: currentId.value, model: model.value }));
+  const remember = () => localStorage.setItem(PREFERENCE_KEY, JSON.stringify({ currentId: currentId.value, model: model.value, agentEnabled: agentEnabled.value }));
+  const toggleAgent = () => { agentEnabled.value = !agentEnabled.value; remember(); };
   const reportError = (value) => { error.value = value?.message || String(value); };
   const setModel = (value) => {
     if (!options.value?.modes.some((item) => item.value === value)) return;
@@ -166,10 +168,11 @@ export const useSessionStore = defineStore("chat", () => {
     activeGeneration.value = { conversationId, requestId: run.requestId, messageId: null, cancelling: false };
     error.value = "";
     let body;
-    if (target) body = { request_id: run.requestId, mode: model.value };
+    if (target) body = { request_id: run.requestId, mode: model.value, agent_enabled: agentEnabled.value };
     else {
       body = new FormData();
       body.set("text", draft.text.trim()); body.set("mode", model.value); body.set("request_id", run.requestId);
+      body.set("agent_enabled", String(agentEnabled.value));
       draft.files.forEach((file) => body.append("files", file));
     }
     try {
@@ -193,6 +196,9 @@ export const useSessionStore = defineStore("chat", () => {
             item.content += event.content || "";
             item.reasoning_content = (item.reasoning_content || "") + (event.reasoning_content || "");
           }
+        } else if (kind === "tools" && !run.cancelRequested) {
+          const item = messagesByConversation.value[conversationId]?.find((message) => message.id === event.message_id && message.id === run.messageId);
+          if (item) item.tool_calls = event.tool_calls;
         } else if (kind === "done" || kind === "error") {
           run.terminal = true; upsertConversation(event.conversation); upsertMessage(event.message);
           if (kind === "error") reportError(event.message_text || event.message?.error_message || "回复生成失败");
@@ -265,7 +271,7 @@ export const useSessionStore = defineStore("chat", () => {
   return {
     conversations, currentId, currentConversation, currentRole, currentRoleMeta, messages, visibleConversations,
     options, configured, keySettingsOpen, ready, loading, error, model, pages, currentDraft, isGenerating, activeGeneration,
-    initialize, reportError, setModel, selectConversation, newConversation, renameConversation, setRole,
+    initialize, reportError, setModel, agentEnabled, toggleAgent, selectConversation, newConversation, renameConversation, setRole,
     configureKey, clearKey, setDraftText, addFiles, removeFile, send, regenerate, cancelGeneration,
     deleteMessage, deleteConversation, clear, importHistory, loadMessages, disconnect,
   };

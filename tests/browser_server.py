@@ -72,6 +72,25 @@ async def fake_model(request: httpx.Request) -> httpx.Response:
         if body["thinking"]["type"] == "enabled"
         else []
     )
+    latest_user = next((message["content"] for message in reversed(body["messages"])
+                        if message["role"] == "user"), "")
+    if "[agent]" in latest_user and body.get("tools"):
+        previous = body["messages"][-1]
+        if previous["role"] == "user":
+            name, arguments, identifier = "calculate", {"expression": "0.1+0.2"}, "browser_calc"
+        elif "result" in json.loads(previous["content"]):
+            name, arguments, identifier = "create_file", {
+                "name": "计算结果", "format": "md", "content": "# 结果\n0.3"
+            }, "browser_file"
+        else:
+            return httpx.Response(200, stream=ModelStream(["已生成文件。", "计算结果为 0.3。"], 0.15))
+        tool_call = {"index": 0, "id": identifier, "type": "function", "function": {
+            "name": name, "arguments": json.dumps(arguments, ensure_ascii=False)
+        }}
+        chunks = [{"choices": [{"delta": {"tool_calls": [tool_call]}, "finish_reason": None}]},
+                  {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}]
+        return httpx.Response(200, text="".join(f"data: {json.dumps(chunk)}\n\n"
+                                              for chunk in chunks) + "data: [DONE]\n\n")
     if "[fail]" in prompt:
         return httpx.Response(429, json={"error": {"message": "Test rate limit"}})
     if "[burst]" in prompt or "[burst-hold]" in prompt:

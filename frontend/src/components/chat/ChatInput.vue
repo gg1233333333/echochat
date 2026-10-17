@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { CircleClose, Close, Key, Microphone, Paperclip, Promotion } from "@element-plus/icons-vue";
+import { CircleClose, Close, Key, Microphone, Paperclip, Promotion, Connection } from "@element-plus/icons-vue";
 import { useSessionStore } from "@/stores/session";
 import { useSpeechInput } from "@/composables/useSpeechInput";
 
@@ -205,6 +205,13 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
           </p>
         </div>
         <div class="toolbar">
+          <el-tooltip content="允许 AI 读取本对话附件、计算、生成文件和联网检索。搜索关键词会发给搜索引擎。" placement="top">
+            <button class="toolbar-btn agent-toggle" :class="{ enabled: store.agentEnabled }"
+              type="button" aria-label="允许使用工具" :aria-pressed="store.agentEnabled"
+              :disabled="!store.ready || store.isGenerating" @click="store.toggleAgent">
+              <el-icon><Connection /></el-icon><span>工具</span>
+            </button>
+          </el-tooltip>
           <el-tooltip content="上传文件" placement="top"
             ><button
               class="toolbar-btn"
@@ -379,6 +386,10 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .toolbar-btn.recording {
   background: var(--color-stop-button-bg);
   color: var(--color-stop-button-text);
+}
+.agent-toggle.enabled {
+  background: var(--color-accent-soft, var(--color-panel-alt));
+  color: var(--color-accent);
 }
 .toolbar-btn:disabled {
   opacity: 0.45;

@@ -1,9 +1,10 @@
 import asyncio
+import copy
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import event, update
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models import Message
@@ -31,15 +32,18 @@ class Database:
         config.set_main_option("sqlalchemy.url", self.url.replace("%", "%%"))
         await asyncio.to_thread(command.upgrade, config, "head")
         async with self.sessions.begin() as session:
-            await session.execute(
-                update(Message)
-                .where(Message.status == "generating")
-                .values(
-                    status="interrupted",
-                    error_code="SERVER_RESTARTED",
-                    error_message="服务已重启，上次生成已中断。",
-                )
-            )
+            for message in await session.scalars(
+                select(Message).where(Message.status == "generating")
+            ):
+                message.status = "interrupted"
+                message.error_code = "SERVER_RESTARTED"
+                message.error_message = "服务已重启，上次生成已中断。"
+                steps = copy.deepcopy(message.agent_steps)
+                for step in steps:
+                    for tool in step["tools"]:
+                        if tool["status"] in {"pending", "running"}:
+                            tool.update(status="interrupted", result={"error": "服务已重启。"})
+                message.agent_steps = steps
 
     async def close(self):
         await self.engine.dispose()

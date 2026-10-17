@@ -16,6 +16,7 @@ import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import { renderMarkdown, markdownPlainText } from "@/utils/markdown";
 import AttachmentPreview from "@/components/chat/AttachmentPreview.vue";
 import ChatInput from "@/components/chat/ChatInput.vue";
+import ToolActivity from "@/components/chat/ToolActivity.vue";
 import ConversationNavigator from "@/components/chat/ConversationNavigator.vue";
 import { useSessionStore } from "@/stores/session";
 import { useStreamingDisplay } from "@/composables/useStreamingDisplay";
@@ -36,6 +37,11 @@ const editingId = ref(null);
 const tempTitle = ref("");
 const savingTitle = ref(false);
 const expandedReasoning = ref({});
+const toolLayoutRevision = ref({});
+const onToolLayout = (id) => {
+  toolLayoutRevision.value[id] = (toolLayoutRevision.value[id] || 0) + 1;
+  onMeasuredLayout();
+};
 const messages = computed(() => store.messages);
 const presentation = useStreamingDisplay({
   messages,
@@ -390,6 +396,9 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
               expandedReasoning[item.id],
               item.status,
               item.error_message,
+              item.tool_calls,
+              toolLayoutRevision[item.id],
+              item.artifacts?.length,
             ]"
           >
             <div
@@ -431,7 +440,9 @@ defineExpose({ selecthistory: (id) => store.selectConversation(id).catch(store.r
                     {{ presentation.reasoningFor(item) }}
                   </div>
                 </div>
-                <div v-if="pending(item)" class="pending-state">
+                <ToolActivity v-if="item.role === 'assistant'" :calls="item.tool_calls"
+                  :artifacts="item.artifacts" @resize="onToolLayout(item.id)" />
+                <div v-if="pending(item) && !item.tool_calls?.length" class="pending-state">
                   <span>{{ item.reasoning_content ? "等待回答" : "等待回复" }}</span
                   ><span class="pending-state__dots" aria-hidden="true"
                     ><span></span><span></span><span></span
